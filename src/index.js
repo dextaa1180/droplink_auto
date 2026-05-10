@@ -9,6 +9,7 @@ const config = readConfig();
 const telegramBaseUrl = `https://api.telegram.org/bot${config.telegramBotToken}`;
 const droplinkHost = safeHost(config.droplinkBaseUrl);
 const chatModes = new Map();
+const teraboxSessions = loadSessionStore(config.sessionStorePath);
 
 const MODES = {
   SHORTEN: 'shorten',
@@ -18,6 +19,10 @@ const MODES = {
 const MENU_BUTTONS = {
   SHORTEN: 'Shorten Link',
   TERABOX: 'Pindah TeraBox',
+  TERABOX_DASHBOARD: 'Dashboard TeraBox',
+  TERABOX_CONNECT: 'Hubungkan TeraBox',
+  TERABOX_STATUS: 'Status Session',
+  TERABOX_DISCONNECT: 'Putus Session',
   HELP: 'Bantuan'
 };
 
@@ -157,6 +162,26 @@ async function handleCommand(message, command) {
     return;
   }
 
+  if (command.name === 'terabox_dashboard' || command.name === 'dashboard_terabox') {
+    await sendTeraboxDashboard(message);
+    return;
+  }
+
+  if (command.name === 'terabox_connect' || command.name === 'hubungkan_terabox') {
+    await startTeraboxSession(message);
+    return;
+  }
+
+  if (command.name === 'terabox_status' || command.name === 'status_terabox') {
+    await showTeraboxSessionStatus(message);
+    return;
+  }
+
+  if (command.name === 'terabox_logout' || command.name === 'putus_terabox') {
+    await disconnectTeraboxSession(message);
+    return;
+  }
+
   await reply(chatId, message.message_id, 'Command tidak dikenal. Pakai /help untuk melihat contoh penggunaan.');
 }
 
@@ -172,6 +197,26 @@ async function handleMenuAction(message, action) {
   if (action === MODES.TERABOX) {
     chatModes.set(String(chatId), MODES.TERABOX);
     await reply(chatId, message.message_id, 'Mode Pindah TeraBox aktif. Kirim link TeraBox yang ingin dipindah dan dibagikan ulang.');
+    return;
+  }
+
+  if (action === 'terabox_dashboard') {
+    await sendTeraboxDashboard(message);
+    return;
+  }
+
+  if (action === 'terabox_connect') {
+    await startTeraboxSession(message);
+    return;
+  }
+
+  if (action === 'terabox_status') {
+    await showTeraboxSessionStatus(message);
+    return;
+  }
+
+  if (action === 'terabox_disconnect') {
+    await disconnectTeraboxSession(message);
     return;
   }
 
@@ -222,7 +267,7 @@ async function reshareTeraboxAndReply(message, urls) {
   const results = [];
   for (const shareUrl of limitedUrls) {
     try {
-      const newShareUrl = await reshareTeraboxLink(shareUrl);
+      const newShareUrl = await reshareTeraboxLink(shareUrl, message);
       results.push({ shareUrl, newShareUrl });
     } catch (error) {
       results.push({ shareUrl, error: error.message });
@@ -232,9 +277,14 @@ async function reshareTeraboxAndReply(message, urls) {
   await reply(chatId, message.message_id, formatTeraboxResults(results));
 }
 
-async function reshareTeraboxLink(shareUrl) {
+async function reshareTeraboxLink(shareUrl, message) {
   if (!config.teraboxReshareApiUrl) {
     throw new Error('Fitur Pindah TeraBox belum dikonfigurasi. Isi TERABOX_RESHARE_API_URL di .env dengan API resmi/endpoint milikmu.');
+  }
+
+  const session = getMessageUserSession(message);
+  if (config.teraboxReshareRequireSession && !session) {
+    throw new Error('Session TeraBox belum terhubung. Buka Dashboard TeraBox lalu pilih Hubungkan TeraBox.');
   }
 
   const headers = {
@@ -253,7 +303,10 @@ async function reshareTeraboxLink(shareUrl) {
     headers,
     body: JSON.stringify({
       url: shareUrl,
-      action: 'reshare'
+      action: 'reshare',
+      sessionId: session ? session.sessionId : undefined,
+      telegramUserId: message.from ? String(message.from.id) : undefined,
+      telegramChatId: String(message.chat.id)
     }),
     signal: AbortSignal.timeout(config.requestTimeoutMs)
   });
@@ -275,6 +328,150 @@ async function reshareTeraboxLink(shareUrl) {
   }
 
   return newShareUrl;
+}
+
+async function sendTeraboxDashboard(message) {
+  if (!(await ensureTeraboxDashboardAccess(message))) {
+    return;
+  }
+
+  const session = getUserSession(message.from.id);
+  await reply(message.chat.id, message.message_id, teraboxDashboardText(session), {
+    reply_markup: teraboxDashboardKeyboard()
+  });
+}
+
+async function startTeraboxSession(message) {
+  if (!(await ensureTeraboxDashboardAccess(message))) {
+    return;
+  }
+
+  if (!config.teraboxSessionStartApiUrl) {
+    await reply(message.chat.id, message.message_id, [
+      'Endpoint session TeraBox belum dikonfigurasi.',
+      '',
+      'Isi TERABOX_SESSION_START_API_URL di .env dengan endpoint resmi/authorized yang membuat QR login.',
+      'Bot tidak menyimpan cookie akun; hanya sessionId/status dari endpoint itu.'
+    ].join('\n'), {
+      reply_markup: teraboxDashboardKeyboard()
+    });
+    return;
+  }
+
+  await telegram('sendChatAction', {
+    chat_id: message.chat.id,
+    action: 'typing'
+  });
+
+  try {
+    const payload = await callTeraboxSessionApi(config.teraboxSessionStartApiUrl, {
+      action: 'start',
+      telegramUserId: String(message.from.id),
+      telegramChatId: String(message.chat.id),
+      username: message.from.username || '',
+      firstName: message.from.first_name || '',
+      lastName: message.from.last_name || ''
+    });
+
+    const session = saveSessionFromPayload(message, payload, 'pending');
+    const text = formatTeraboxSessionStart(payload, session);
+    const qrImageUrl = getPayloadString(payload, ['qrImageUrl', 'qr_image_url', 'qrUrl', 'qr_url']);
+
+    if (qrImageUrl && isHttpUrl(qrImageUrl)) {
+      await sendPhoto(message.chat.id, qrImageUrl, text, {
+        reply_to_message_id: message.message_id,
+        reply_markup: teraboxDashboardKeyboard()
+      });
+      return;
+    }
+
+    await reply(message.chat.id, message.message_id, text, {
+      reply_markup: teraboxDashboardKeyboard()
+    });
+  } catch (error) {
+    await reply(message.chat.id, message.message_id, `Gagal memulai session TeraBox: ${error.message}`, {
+      reply_markup: teraboxDashboardKeyboard()
+    });
+  }
+}
+
+async function showTeraboxSessionStatus(message) {
+  if (!(await ensureTeraboxDashboardAccess(message))) {
+    return;
+  }
+
+  const existing = getUserSession(message.from.id);
+  if (!existing) {
+    await reply(message.chat.id, message.message_id, 'Belum ada session TeraBox. Pilih Hubungkan TeraBox untuk mulai.', {
+      reply_markup: teraboxDashboardKeyboard()
+    });
+    return;
+  }
+
+  if (!config.teraboxSessionStatusApiUrl) {
+    await reply(message.chat.id, message.message_id, formatTeraboxSessionStatus(existing, 'Status ini dari data lokal karena TERABOX_SESSION_STATUS_API_URL belum diisi.'), {
+      reply_markup: teraboxDashboardKeyboard()
+    });
+    return;
+  }
+
+  await telegram('sendChatAction', {
+    chat_id: message.chat.id,
+    action: 'typing'
+  });
+
+  try {
+    const payload = await callTeraboxSessionApi(config.teraboxSessionStatusApiUrl, {
+      action: 'status',
+      sessionId: existing.sessionId,
+      telegramUserId: String(message.from.id),
+      telegramChatId: String(message.chat.id)
+    });
+
+    const session = saveSessionFromPayload(message, payload, existing.status || 'pending');
+    await reply(message.chat.id, message.message_id, formatTeraboxSessionStatus(session), {
+      reply_markup: teraboxDashboardKeyboard()
+    });
+  } catch (error) {
+    await reply(message.chat.id, message.message_id, `Gagal cek status session TeraBox: ${error.message}`, {
+      reply_markup: teraboxDashboardKeyboard()
+    });
+  }
+}
+
+async function disconnectTeraboxSession(message) {
+  if (!(await ensureTeraboxDashboardAccess(message))) {
+    return;
+  }
+
+  const existing = getUserSession(message.from.id);
+  if (!existing) {
+    await reply(message.chat.id, message.message_id, 'Tidak ada session TeraBox yang tersimpan.', {
+      reply_markup: teraboxDashboardKeyboard()
+    });
+    return;
+  }
+
+  if (config.teraboxSessionDisconnectApiUrl) {
+    try {
+      await callTeraboxSessionApi(config.teraboxSessionDisconnectApiUrl, {
+        action: 'disconnect',
+        sessionId: existing.sessionId,
+        telegramUserId: String(message.from.id),
+        telegramChatId: String(message.chat.id)
+      });
+    } catch (error) {
+      await reply(message.chat.id, message.message_id, `Endpoint disconnect gagal: ${error.message}\nSession lokal belum dihapus.`, {
+        reply_markup: teraboxDashboardKeyboard()
+      });
+      return;
+    }
+  }
+
+  deleteUserSession(message.from.id);
+  await reply(message.chat.id, message.message_id, 'Session TeraBox lokal sudah diputus.', {
+    reply_markup: teraboxDashboardKeyboard()
+  });
 }
 
 async function shortenWithDroplink(longUrl, alias) {
@@ -334,6 +531,52 @@ async function telegram(method, body, timeoutMs = config.requestTimeoutMs) {
   return payload.result;
 }
 
+async function sendPhoto(chatId, photo, caption, options = {}) {
+  return telegram('sendPhoto', {
+    chat_id: chatId,
+    photo,
+    caption,
+    ...options
+  });
+}
+
+async function callTeraboxSessionApi(endpoint, body) {
+  const headers = {
+    accept: 'application/json, text/plain;q=0.9, */*;q=0.8',
+    'content-type': 'application/json',
+    'user-agent': 'TunaDroplinkTelegramBot/1.0'
+  };
+
+  if (config.teraboxSessionApiKey) {
+    headers.authorization = `Bearer ${config.teraboxSessionApiKey}`;
+    headers['x-api-key'] = config.teraboxSessionApiKey;
+  }
+
+  const response = await fetch(endpoint, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify(body),
+    signal: AbortSignal.timeout(config.requestTimeoutMs)
+  });
+
+  const responseBody = await response.text();
+  if (!response.ok) {
+    throw new Error(`HTTP ${response.status}: ${truncate(responseBody)}`);
+  }
+
+  const payload = parseResponseBody(responseBody);
+  if (!payload || typeof payload !== 'object') {
+    throw new Error('Response endpoint session harus JSON object.');
+  }
+
+  const apiStatus = String(payload.status || '').toLowerCase();
+  if (apiStatus && !['success', 'pending', 'connected', 'authorized', 'disconnected'].includes(apiStatus)) {
+    throw new Error(payload.message || 'Endpoint session menolak request.');
+  }
+
+  return payload;
+}
+
 async function reply(chatId, replyToMessageId, text, options = {}) {
   return sendMessage(chatId, text, {
     reply_to_message_id: replyToMessageId,
@@ -367,10 +610,17 @@ function readConfig() {
     droplinkBaseUrl,
     allowedUserIds: parseIdSet(process.env.ALLOWED_USER_IDS || ''),
     allowedChatIds: parseIdSet(process.env.ALLOWED_CHAT_IDS || ''),
+    teraboxDashboardUserIds: parseIdSet(process.env.TERABOX_DASHBOARD_USER_IDS || ''),
     maxUrlsPerMessage: parsePositiveInt(process.env.MAX_URLS_PER_MESSAGE, 5),
     requestTimeoutMs: parsePositiveInt(process.env.REQUEST_TIMEOUT_MS, 15000),
-    teraboxReshareApiUrl: optionalUrl(process.env.TERABOX_RESHARE_API_URL || ''),
-    teraboxReshareApiKey: (process.env.TERABOX_RESHARE_API_KEY || '').trim()
+    teraboxReshareApiUrl: optionalUrl(process.env.TERABOX_RESHARE_API_URL || '', 'TERABOX_RESHARE_API_URL'),
+    teraboxReshareApiKey: (process.env.TERABOX_RESHARE_API_KEY || '').trim(),
+    teraboxReshareRequireSession: parseBool(process.env.TERABOX_RESHARE_REQUIRE_SESSION, false),
+    teraboxSessionStartApiUrl: optionalUrl(process.env.TERABOX_SESSION_START_API_URL || '', 'TERABOX_SESSION_START_API_URL'),
+    teraboxSessionStatusApiUrl: optionalUrl(process.env.TERABOX_SESSION_STATUS_API_URL || '', 'TERABOX_SESSION_STATUS_API_URL'),
+    teraboxSessionDisconnectApiUrl: optionalUrl(process.env.TERABOX_SESSION_DISCONNECT_API_URL || '', 'TERABOX_SESSION_DISCONNECT_API_URL'),
+    teraboxSessionApiKey: (process.env.TERABOX_SESSION_API_KEY || '').trim(),
+    sessionStorePath: resolveWorkspacePath(process.env.TERABOX_SESSION_STORE_FILE || path.join(process.env.DATA_DIR || 'data', 'terabox-sessions.json'))
   };
 }
 
@@ -459,6 +709,22 @@ function parseMenuButton(text) {
 
   if (normalized === MENU_BUTTONS.TERABOX.toLowerCase()) {
     return MODES.TERABOX;
+  }
+
+  if (normalized === MENU_BUTTONS.TERABOX_DASHBOARD.toLowerCase()) {
+    return 'terabox_dashboard';
+  }
+
+  if (normalized === MENU_BUTTONS.TERABOX_CONNECT.toLowerCase()) {
+    return 'terabox_connect';
+  }
+
+  if (normalized === MENU_BUTTONS.TERABOX_STATUS.toLowerCase()) {
+    return 'terabox_status';
+  }
+
+  if (normalized === MENU_BUTTONS.TERABOX_DISCONNECT.toLowerCase()) {
+    return 'terabox_disconnect';
   }
 
   if (normalized === MENU_BUTTONS.HELP.toLowerCase()) {
@@ -613,6 +879,46 @@ function parseResponseBody(body) {
   }
 }
 
+function saveSessionFromPayload(message, payload, fallbackStatus) {
+  const existing = getUserSession(message.from.id) || {};
+  const status = normalizeSessionStatus(getPayloadString(payload, ['status']) || fallbackStatus);
+  const sessionId = getPayloadString(payload, ['sessionId', 'session_id', 'id']) || existing.sessionId;
+  const now = new Date().toISOString();
+
+  if (!sessionId) {
+    throw new Error('Response endpoint session tidak berisi sessionId.');
+  }
+
+  const session = {
+    userId: String(message.from.id),
+    chatId: String(message.chat.id),
+    sessionId,
+    status,
+    accountName: getPayloadString(payload, ['accountName', 'account_name', 'displayName', 'display_name', 'name']) || existing.accountName || '',
+    accountEmail: getPayloadString(payload, ['accountEmail', 'account_email', 'email']) || existing.accountEmail || '',
+    createdAt: existing.createdAt || now,
+    connectedAt: status === 'connected' ? (existing.connectedAt || now) : existing.connectedAt || '',
+    expiresAt: getPayloadString(payload, ['expiresAt', 'expires_at', 'expireAt', 'expire_at']) || existing.expiresAt || '',
+    updatedAt: now
+  };
+
+  setUserSession(message.from.id, session);
+  return session;
+}
+
+function normalizeSessionStatus(status) {
+  const normalized = String(status || '').toLowerCase();
+  if (normalized === 'authorized') {
+    return 'connected';
+  }
+
+  if (['connected', 'pending', 'expired', 'disconnected', 'failed'].includes(normalized)) {
+    return normalized;
+  }
+
+  return 'pending';
+}
+
 function formatResults(results) {
   if (results.length === 1 && results[0].shortUrl) {
     return results[0].shortUrl;
@@ -651,6 +957,10 @@ function helpText() {
     '/short https://example.com nama-alias',
     '/short https://example.com alias=nama-alias',
     '/terabox https://1024terabox.com/s/xxxxx',
+    '/terabox_dashboard',
+    '/terabox_connect',
+    '/terabox_status',
+    '/terabox_logout',
     '',
     'Catatan: Pindah TeraBox memerlukan TERABOX_RESHARE_API_URL dan hanya untuk file yang kamu punya izin untuk salin/share ulang.'
   ].join('\n');
@@ -662,6 +972,7 @@ function menuText() {
     '',
     `${MENU_BUTTONS.SHORTEN} - buat shortlink Droplink`,
     `${MENU_BUTTONS.TERABOX} - pindah/share ulang link TeraBox`,
+    `${MENU_BUTTONS.TERABOX_DASHBOARD} - kelola session pribadi`,
     `${MENU_BUTTONS.HELP} - lihat bantuan`
   ].join('\n');
 }
@@ -670,12 +981,141 @@ function menuKeyboard() {
   return {
     keyboard: [
       [{ text: MENU_BUTTONS.SHORTEN }, { text: MENU_BUTTONS.TERABOX }],
-      [{ text: MENU_BUTTONS.HELP }]
+      [{ text: MENU_BUTTONS.TERABOX_DASHBOARD }, { text: MENU_BUTTONS.HELP }]
     ],
     resize_keyboard: true,
     one_time_keyboard: false,
     input_field_placeholder: 'Pilih menu atau kirim link'
   };
+}
+
+function teraboxDashboardText(session) {
+  return [
+    'Dashboard TeraBox pribadi',
+    '',
+    session ? formatSessionSummary(session) : 'Status: belum terhubung',
+    '',
+    `${MENU_BUTTONS.TERABOX_CONNECT} - mulai login QR dari endpoint session`,
+    `${MENU_BUTTONS.TERABOX_STATUS} - cek status session`,
+    `${MENU_BUTTONS.TERABOX_DISCONNECT} - putus session lokal/endpoint`
+  ].join('\n');
+}
+
+function teraboxDashboardKeyboard() {
+  return {
+    keyboard: [
+      [{ text: MENU_BUTTONS.TERABOX_CONNECT }, { text: MENU_BUTTONS.TERABOX_STATUS }],
+      [{ text: MENU_BUTTONS.TERABOX_DISCONNECT }],
+      [{ text: MENU_BUTTONS.SHORTEN }, { text: MENU_BUTTONS.TERABOX }],
+      [{ text: MENU_BUTTONS.TERABOX_DASHBOARD }, { text: MENU_BUTTONS.HELP }]
+    ],
+    resize_keyboard: true,
+    one_time_keyboard: false,
+    input_field_placeholder: 'Kelola session TeraBox'
+  };
+}
+
+function formatTeraboxSessionStart(payload, session) {
+  const loginUrl = getPayloadString(payload, ['loginUrl', 'login_url', 'authorizeUrl', 'authorize_url']);
+  const expiresAt = getPayloadString(payload, ['expiresAt', 'expires_at', 'expireAt', 'expire_at']) || session.expiresAt;
+  const lines = [
+    'Session TeraBox dimulai.',
+    '',
+    formatSessionSummary(session)
+  ];
+
+  if (loginUrl) {
+    lines.push('', `Login URL: ${loginUrl}`);
+  }
+
+  if (expiresAt) {
+    lines.push(`Berlaku sampai: ${expiresAt}`);
+  }
+
+  lines.push('', 'Setelah login selesai, pilih Status Session.');
+  return lines.join('\n');
+}
+
+function formatTeraboxSessionStatus(session, note) {
+  const lines = [
+    'Status session TeraBox:',
+    '',
+    formatSessionSummary(session)
+  ];
+
+  if (note) {
+    lines.push('', note);
+  }
+
+  return lines.join('\n');
+}
+
+function formatSessionSummary(session) {
+  const lines = [
+    `Status: ${session.status || 'unknown'}`,
+    `Session ID: ${maskValue(session.sessionId)}`
+  ];
+
+  if (session.accountName) {
+    lines.push(`Akun: ${session.accountName}`);
+  }
+
+  if (session.accountEmail) {
+    lines.push(`Email: ${maskEmail(session.accountEmail)}`);
+  }
+
+  if (session.connectedAt) {
+    lines.push(`Terhubung: ${session.connectedAt}`);
+  }
+
+  if (session.expiresAt) {
+    lines.push(`Expired: ${session.expiresAt}`);
+  }
+
+  if (session.updatedAt) {
+    lines.push(`Update: ${session.updatedAt}`);
+  }
+
+  return lines.join('\n');
+}
+
+async function ensureTeraboxDashboardAccess(message) {
+  const chatId = message.chat.id;
+  const userId = message.from && message.from.id;
+
+  if (!userId) {
+    await reply(chatId, message.message_id, 'Dashboard TeraBox hanya tersedia untuk akun user, bukan channel.');
+    return false;
+  }
+
+  if (!isPrivateChat(message)) {
+    await reply(chatId, message.message_id, 'Dashboard TeraBox hanya bisa dibuka di chat private dengan bot.');
+    return false;
+  }
+
+  if (!isAllowedDashboardUser(userId)) {
+    await reply(chatId, message.message_id, 'Dashboard TeraBox dibatasi untuk user yang diizinkan.');
+    return false;
+  }
+
+  return true;
+}
+
+function isPrivateChat(message) {
+  return message.chat.type === 'private' || String(message.chat.id) === String(message.from && message.from.id);
+}
+
+function isAllowedDashboardUser(userId) {
+  const id = String(userId);
+  if (config.teraboxDashboardUserIds.size > 0) {
+    return config.teraboxDashboardUserIds.has(id);
+  }
+
+  if (config.allowedUserIds.size > 0) {
+    return config.allowedUserIds.has(id);
+  }
+
+  return true;
 }
 
 function isAllowedTarget(userId, chatId) {
@@ -695,6 +1135,14 @@ function parsePositiveInt(value, fallback) {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 }
 
+function parseBool(value, fallback) {
+  if (value === undefined || value === null || String(value).trim() === '') {
+    return fallback;
+  }
+
+  return ['1', 'true', 'yes', 'y', 'on'].includes(String(value).trim().toLowerCase());
+}
+
 function cleanBaseUrl(value) {
   const url = new URL(value);
   if (url.protocol !== 'http:' && url.protocol !== 'https:') {
@@ -707,18 +1155,108 @@ function cleanBaseUrl(value) {
   return url.toString().replace(/\/$/g, '');
 }
 
-function optionalUrl(value) {
+function optionalUrl(value, name = 'URL') {
   const clean = value.trim();
   if (!clean) {
     return '';
   }
 
-  const url = new URL(clean);
+  let url;
+  try {
+    url = new URL(clean);
+  } catch {
+    throw new Error(`${name} harus URL HTTP/HTTPS yang valid.`);
+  }
+
   if (url.protocol !== 'http:' && url.protocol !== 'https:') {
-    throw new Error('TERABOX_RESHARE_API_URL harus URL HTTP/HTTPS.');
+    throw new Error(`${name} harus URL HTTP/HTTPS.`);
   }
 
   return url.toString();
+}
+
+function resolveWorkspacePath(value) {
+  return path.isAbsolute(value) ? value : path.resolve(process.cwd(), value);
+}
+
+function loadSessionStore(filePath) {
+  if (!fs.existsSync(filePath)) {
+    return {};
+  }
+
+  try {
+    const parsed = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+  } catch (error) {
+    console.warn(`[session-store] Gagal baca ${filePath}: ${error.message}`);
+    return {};
+  }
+}
+
+function saveSessionStore() {
+  fs.mkdirSync(path.dirname(config.sessionStorePath), { recursive: true });
+  const tempPath = `${config.sessionStorePath}.tmp`;
+  fs.writeFileSync(tempPath, JSON.stringify(teraboxSessions, null, 2));
+  fs.renameSync(tempPath, config.sessionStorePath);
+}
+
+function getMessageUserSession(message) {
+  if (!message.from || !message.from.id) {
+    return null;
+  }
+
+  return getUserSession(message.from.id);
+}
+
+function getUserSession(userId) {
+  return teraboxSessions[String(userId)] || null;
+}
+
+function setUserSession(userId, session) {
+  teraboxSessions[String(userId)] = session;
+  saveSessionStore();
+}
+
+function deleteUserSession(userId) {
+  delete teraboxSessions[String(userId)];
+  saveSessionStore();
+}
+
+function getPayloadString(payload, keys) {
+  if (!payload || typeof payload !== 'object') {
+    return '';
+  }
+
+  for (const key of keys) {
+    const value = payload[key];
+    if (typeof value === 'string' && value.trim()) {
+      return value.trim();
+    }
+
+    if (typeof value === 'number' && Number.isFinite(value)) {
+      return String(value);
+    }
+  }
+
+  return '';
+}
+
+function maskValue(value) {
+  const text = String(value || '');
+  if (text.length <= 8) {
+    return text || '-';
+  }
+
+  return `${text.slice(0, 4)}...${text.slice(-4)}`;
+}
+
+function maskEmail(value) {
+  const [name, domain] = String(value || '').split('@');
+  if (!name || !domain) {
+    return maskValue(value);
+  }
+
+  return `${name.slice(0, 2)}***@${domain}`;
 }
 
 function ensureTrailingSlash(value) {
