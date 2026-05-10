@@ -8,6 +8,29 @@ loadEnvFile(path.join(process.cwd(), '.env'));
 const config = readConfig();
 const telegramBaseUrl = `https://api.telegram.org/bot${config.telegramBotToken}`;
 const droplinkHost = safeHost(config.droplinkBaseUrl);
+const chatModes = new Map();
+
+const MODES = {
+  SHORTEN: 'shorten',
+  TERABOX: 'terabox'
+};
+
+const MENU_BUTTONS = {
+  SHORTEN: 'Shorten Link',
+  TERABOX: 'Pindah TeraBox',
+  HELP: 'Bantuan'
+};
+
+const TERABOX_HOSTS = new Set([
+  '1024terabox.com',
+  'terabox.com',
+  'teraboxapp.com',
+  'teraboxlink.com',
+  'freeterabox.com',
+  '4funbox.com',
+  'mirrobox.com',
+  'tibibox.com'
+]);
 
 let updateOffset = 0;
 let isStopping = false;
@@ -65,13 +88,31 @@ async function handleUpdate(update) {
     return;
   }
 
+  const menuAction = parseMenuButton(text);
+  if (menuAction) {
+    await handleMenuAction(message, menuAction);
+    return;
+  }
+
   const command = parseCommand(text);
   if (command) {
     await handleCommand(message, command);
     return;
   }
 
-  const urls = uniqueUrls(extractUrls(text).filter((url) => !isDroplinkUrl(url)));
+  const mode = chatModes.get(chatIdString);
+  const teraboxUrls = uniqueUrls(extractUrls(text).filter(isTeraboxUrl));
+  if (mode === MODES.TERABOX || teraboxUrls.length > 0) {
+    if (teraboxUrls.length === 0) {
+      await reply(chatId, message.message_id, 'Kirim link TeraBox, contoh: https://1024terabox.com/s/xxxxx');
+      return;
+    }
+
+    await reshareTeraboxAndReply(message, teraboxUrls);
+    return;
+  }
+
+  const urls = uniqueUrls(extractUrls(text).filter((url) => !isDroplinkUrl(url) && !isTeraboxUrl(url)));
   if (urls.length === 0) {
     return;
   }
@@ -82,7 +123,13 @@ async function handleUpdate(update) {
 async function handleCommand(message, command) {
   const chatId = message.chat.id;
 
-  if (command.name === 'start' || command.name === 'help') {
+  if (command.name === 'start' || command.name === 'menu') {
+    chatModes.delete(String(chatId));
+    await sendMenu(chatId, message.message_id);
+    return;
+  }
+
+  if (command.name === 'help') {
     await reply(chatId, message.message_id, helpText());
     return;
   }
@@ -98,7 +145,39 @@ async function handleCommand(message, command) {
     return;
   }
 
+  if (command.name === 'terabox' || command.name === 'pindah') {
+    const urls = uniqueUrls(extractUrls(command.body).filter(isTeraboxUrl));
+    if (urls.length === 0) {
+      chatModes.set(String(chatId), MODES.TERABOX);
+      await reply(chatId, message.message_id, 'Mode Pindah TeraBox aktif. Kirim link TeraBox yang ingin diproses.');
+      return;
+    }
+
+    await reshareTeraboxAndReply(message, urls);
+    return;
+  }
+
   await reply(chatId, message.message_id, 'Command tidak dikenal. Pakai /help untuk melihat contoh penggunaan.');
+}
+
+async function handleMenuAction(message, action) {
+  const chatId = message.chat.id;
+
+  if (action === MODES.SHORTEN) {
+    chatModes.set(String(chatId), MODES.SHORTEN);
+    await reply(chatId, message.message_id, 'Mode Shorten aktif. Kirim link yang ingin dibuat shortlink Droplink.');
+    return;
+  }
+
+  if (action === MODES.TERABOX) {
+    chatModes.set(String(chatId), MODES.TERABOX);
+    await reply(chatId, message.message_id, 'Mode Pindah TeraBox aktif. Kirim link TeraBox yang ingin dipindah dan dibagikan ulang.');
+    return;
+  }
+
+  await reply(chatId, message.message_id, helpText(), {
+    reply_markup: menuKeyboard()
+  });
 }
 
 async function shortenAndReply(message, urls, alias) {
@@ -125,6 +204,77 @@ async function shortenAndReply(message, urls, alias) {
   }
 
   await reply(chatId, message.message_id, formatResults(results));
+}
+
+async function reshareTeraboxAndReply(message, urls) {
+  const chatId = message.chat.id;
+  const limitedUrls = uniqueUrls(urls).slice(0, config.maxUrlsPerMessage);
+
+  if (urls.length > limitedUrls.length) {
+    await reply(chatId, message.message_id, `Saya proses ${limitedUrls.length} link TeraBox pertama dulu.`);
+  }
+
+  await telegram('sendChatAction', {
+    chat_id: chatId,
+    action: 'typing'
+  });
+
+  const results = [];
+  for (const shareUrl of limitedUrls) {
+    try {
+      const newShareUrl = await reshareTeraboxLink(shareUrl);
+      results.push({ shareUrl, newShareUrl });
+    } catch (error) {
+      results.push({ shareUrl, error: error.message });
+    }
+  }
+
+  await reply(chatId, message.message_id, formatTeraboxResults(results));
+}
+
+async function reshareTeraboxLink(shareUrl) {
+  if (!config.teraboxReshareApiUrl) {
+    throw new Error('Fitur Pindah TeraBox belum dikonfigurasi. Isi TERABOX_RESHARE_API_URL di .env dengan API resmi/endpoint milikmu.');
+  }
+
+  const headers = {
+    accept: 'application/json, text/plain;q=0.9, */*;q=0.8',
+    'content-type': 'application/json',
+    'user-agent': 'TunaDroplinkTelegramBot/1.0'
+  };
+
+  if (config.teraboxReshareApiKey) {
+    headers.authorization = `Bearer ${config.teraboxReshareApiKey}`;
+    headers['x-api-key'] = config.teraboxReshareApiKey;
+  }
+
+  const response = await fetch(config.teraboxReshareApiUrl, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({
+      url: shareUrl,
+      action: 'reshare'
+    }),
+    signal: AbortSignal.timeout(config.requestTimeoutMs)
+  });
+
+  const body = await response.text();
+  if (!response.ok) {
+    throw new Error(`TeraBox API HTTP ${response.status}: ${truncate(body)}`);
+  }
+
+  const payload = parseResponseBody(body);
+  const apiStatus = typeof payload === 'object' && payload ? String(payload.status || '').toLowerCase() : '';
+  if (apiStatus && apiStatus !== 'success') {
+    throw new Error(payload.message || 'TeraBox API menolak request.');
+  }
+
+  const newShareUrl = findTeraboxShareUrl(payload, body);
+  if (!newShareUrl) {
+    throw new Error('Response TeraBox API tidak berisi shareUrl baru.');
+  }
+
+  return newShareUrl;
 }
 
 async function shortenWithDroplink(longUrl, alias) {
@@ -184,12 +334,25 @@ async function telegram(method, body, timeoutMs = config.requestTimeoutMs) {
   return payload.result;
 }
 
-async function reply(chatId, replyToMessageId, text) {
+async function reply(chatId, replyToMessageId, text, options = {}) {
+  return sendMessage(chatId, text, {
+    reply_to_message_id: replyToMessageId,
+    ...options
+  });
+}
+
+async function sendMessage(chatId, text, options = {}) {
   return telegram('sendMessage', {
     chat_id: chatId,
     text,
-    reply_to_message_id: replyToMessageId,
-    disable_web_page_preview: true
+    disable_web_page_preview: true,
+    ...options
+  });
+}
+
+async function sendMenu(chatId, replyToMessageId) {
+  return reply(chatId, replyToMessageId, menuText(), {
+    reply_markup: menuKeyboard()
   });
 }
 
@@ -205,7 +368,9 @@ function readConfig() {
     allowedUserIds: parseIdSet(process.env.ALLOWED_USER_IDS || ''),
     allowedChatIds: parseIdSet(process.env.ALLOWED_CHAT_IDS || ''),
     maxUrlsPerMessage: parsePositiveInt(process.env.MAX_URLS_PER_MESSAGE, 5),
-    requestTimeoutMs: parsePositiveInt(process.env.REQUEST_TIMEOUT_MS, 15000)
+    requestTimeoutMs: parsePositiveInt(process.env.REQUEST_TIMEOUT_MS, 15000),
+    teraboxReshareApiUrl: optionalUrl(process.env.TERABOX_RESHARE_API_URL || ''),
+    teraboxReshareApiKey: (process.env.TERABOX_RESHARE_API_KEY || '').trim()
   };
 }
 
@@ -269,7 +434,7 @@ function parseCommand(text) {
 }
 
 function parseShortCommand(body) {
-  const urlMatches = extractUrlMatches(body).filter((item) => !isDroplinkUrl(item.url));
+  const urlMatches = extractUrlMatches(body).filter((item) => !isDroplinkUrl(item.url) && !isTeraboxUrl(item.url));
   const urls = uniqueUrls(urlMatches.map((item) => item.url));
   let alias = findAlias(body);
 
@@ -283,6 +448,24 @@ function parseShortCommand(body) {
   }
 
   return { urls, alias };
+}
+
+function parseMenuButton(text) {
+  const normalized = text.trim().toLowerCase();
+
+  if (normalized === MENU_BUTTONS.SHORTEN.toLowerCase()) {
+    return MODES.SHORTEN;
+  }
+
+  if (normalized === MENU_BUTTONS.TERABOX.toLowerCase()) {
+    return MODES.TERABOX;
+  }
+
+  if (normalized === MENU_BUTTONS.HELP.toLowerCase()) {
+    return 'help';
+  }
+
+  return null;
 }
 
 function extractUrls(text) {
@@ -345,6 +528,15 @@ function isDroplinkUrl(url) {
   }
 }
 
+function isTeraboxUrl(url) {
+  try {
+    const host = new URL(url).hostname.replace(/^www\./i, '').toLowerCase();
+    return TERABOX_HOSTS.has(host) || [...TERABOX_HOSTS].some((domain) => host.endsWith(`.${domain}`));
+  } catch {
+    return false;
+  }
+}
+
 function findAlias(text) {
   const match = text.match(/(?:^|\s)(?:--)?alias=([a-z0-9_-]{1,50})(?=\s|$)/i);
   return match ? match[1] : undefined;
@@ -381,6 +573,38 @@ function findShortUrl(payload, body) {
   return match ? stripTrailingPunctuation(match[0]) : null;
 }
 
+function findTeraboxShareUrl(payload, body) {
+  if (payload && typeof payload === 'object') {
+    const candidates = [
+      payload.shareUrl,
+      payload.share_url,
+      payload.sharedUrl,
+      payload.shared_url,
+      payload.newShareUrl,
+      payload.new_share_url,
+      payload.url,
+      payload.result
+    ];
+
+    for (const candidate of candidates) {
+      if (typeof candidate === 'string' && isTeraboxUrl(candidate)) {
+        return candidate;
+      }
+    }
+  }
+
+  if (typeof payload === 'string' && isTeraboxUrl(payload.trim())) {
+    return payload.trim();
+  }
+
+  const match = body.match(/https?:\/\/[^\s"'<>]+/i);
+  if (match && isTeraboxUrl(stripTrailingPunctuation(match[0]))) {
+    return stripTrailingPunctuation(match[0]);
+  }
+
+  return null;
+}
+
 function parseResponseBody(body) {
   try {
     return JSON.parse(body);
@@ -403,15 +627,55 @@ function formatResults(results) {
   }).join('\n\n');
 }
 
+function formatTeraboxResults(results) {
+  if (results.length === 1 && results[0].newShareUrl) {
+    return results[0].newShareUrl;
+  }
+
+  return results.map((result, index) => {
+    if (result.newShareUrl) {
+      return `${index + 1}. ${result.shareUrl}\n=> ${result.newShareUrl}`;
+    }
+
+    return `${index + 1}. ${result.shareUrl}\nGagal: ${result.error}`;
+  }).join('\n\n');
+}
+
 function helpText() {
   return [
-    'Kirim link apa saja, bot akan otomatis membuat short link Droplink.',
+    'Kirim link biasa untuk dibuat shortlink Droplink.',
+    'Kirim link TeraBox untuk diproses lewat mode Pindah TeraBox.',
     '',
     'Contoh:',
     '/short https://example.com',
     '/short https://example.com nama-alias',
-    '/short https://example.com alias=nama-alias'
+    '/short https://example.com alias=nama-alias',
+    '/terabox https://1024terabox.com/s/xxxxx',
+    '',
+    'Catatan: Pindah TeraBox memerlukan TERABOX_RESHARE_API_URL dan hanya untuk file yang kamu punya izin untuk salin/share ulang.'
   ].join('\n');
+}
+
+function menuText() {
+  return [
+    'Pilih menu:',
+    '',
+    `${MENU_BUTTONS.SHORTEN} - buat shortlink Droplink`,
+    `${MENU_BUTTONS.TERABOX} - pindah/share ulang link TeraBox`,
+    `${MENU_BUTTONS.HELP} - lihat bantuan`
+  ].join('\n');
+}
+
+function menuKeyboard() {
+  return {
+    keyboard: [
+      [{ text: MENU_BUTTONS.SHORTEN }, { text: MENU_BUTTONS.TERABOX }],
+      [{ text: MENU_BUTTONS.HELP }]
+    ],
+    resize_keyboard: true,
+    one_time_keyboard: false,
+    input_field_placeholder: 'Pilih menu atau kirim link'
+  };
 }
 
 function isAllowedTarget(userId, chatId) {
@@ -441,6 +705,20 @@ function cleanBaseUrl(value) {
   url.search = '';
   url.hash = '';
   return url.toString().replace(/\/$/g, '');
+}
+
+function optionalUrl(value) {
+  const clean = value.trim();
+  if (!clean) {
+    return '';
+  }
+
+  const url = new URL(clean);
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') {
+    throw new Error('TERABOX_RESHARE_API_URL harus URL HTTP/HTTPS.');
+  }
+
+  return url.toString();
 }
 
 function ensureTrailingSlash(value) {
