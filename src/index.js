@@ -13,12 +13,12 @@ const teraboxSessions = loadSessionStore(config.sessionStorePath);
 
 const MODES = {
   SHORTEN: 'shorten',
-  TERABOX: 'terabox'
+  TERABOX_PRO: 'terabox_pro'
 };
 
 const MENU_BUTTONS = {
   SHORTEN: 'Shorten Link',
-  TERABOX: 'Convert TeraBox',
+  TERABOX_PRO: 'TeraBox Pro',
   TERABOX_DASHBOARD: 'Dashboard TeraBox',
   TERABOX_CONNECT: 'Hubungkan TeraBox',
   TERABOX_STATUS: 'Status Session',
@@ -107,7 +107,7 @@ async function handleUpdate(update) {
 
   const mode = chatModes.get(chatIdString);
   const teraboxUrls = uniqueUrls(extractUrls(text).filter(isTeraboxUrl));
-  if (mode === MODES.TERABOX || teraboxUrls.length > 0) {
+  if (mode === MODES.TERABOX_PRO || teraboxUrls.length > 0) {
     if (teraboxUrls.length === 0) {
       await reply(chatId, message.message_id, 'Kirim link TeraBox, contoh: https://1024terabox.com/s/xxxxx');
       return;
@@ -150,11 +150,11 @@ async function handleCommand(message, command) {
     return;
   }
 
-  if (command.name === 'terabox' || command.name === 'pindah') {
+  if (command.name === 'terabox_pro' || command.name === 'terabox' || command.name === 'pindah') {
     const urls = uniqueUrls(extractUrls(command.body).filter(isTeraboxUrl));
     if (urls.length === 0) {
-      chatModes.set(String(chatId), MODES.TERABOX);
-      await reply(chatId, message.message_id, 'Mode Convert TeraBox aktif. Kirim link TeraBox yang ingin diproses.');
+      chatModes.set(String(chatId), MODES.TERABOX_PRO);
+      await reply(chatId, message.message_id, 'Mode TeraBox Pro aktif. Kirim link TeraBox yang ingin diproses.');
       return;
     }
 
@@ -194,9 +194,9 @@ async function handleMenuAction(message, action) {
     return;
   }
 
-  if (action === MODES.TERABOX) {
-    chatModes.set(String(chatId), MODES.TERABOX);
-    await reply(chatId, message.message_id, 'Mode Convert TeraBox aktif. Kirim link TeraBox untuk mengambil metadata, download link, dan stream link dari API.');
+  if (action === MODES.TERABOX_PRO) {
+    chatModes.set(String(chatId), MODES.TERABOX_PRO);
+    await reply(chatId, message.message_id, 'Mode TeraBox Pro aktif. Kirim link TeraBox untuk mengambil metadata, download link, dan stream link dari API.');
     return;
   }
 
@@ -279,7 +279,7 @@ async function reshareTeraboxAndReply(message, urls) {
 
 async function reshareTeraboxLink(shareUrl, message) {
   if (!config.teraboxReshareApiUrl) {
-    throw new Error('Fitur Convert TeraBox belum dikonfigurasi. Isi TERABOX_RESHARE_API_URL di .env.');
+    throw new Error('Fitur TeraBox Pro belum dikonfigurasi. Isi TERABOX_RESHARE_API_URL di .env.');
   }
 
   const session = getMessageUserSession(message);
@@ -716,12 +716,12 @@ function parseMenuButton(text) {
     return MODES.SHORTEN;
   }
 
-  if (normalized === MENU_BUTTONS.TERABOX.toLowerCase()) {
-    return MODES.TERABOX;
+  if (normalized === MENU_BUTTONS.TERABOX_PRO.toLowerCase()) {
+    return MODES.TERABOX_PRO;
   }
 
-  if (normalized === 'pindah terabox') {
-    return MODES.TERABOX;
+  if (normalized === 'convert terabox' || normalized === 'pindah terabox') {
+    return MODES.TERABOX_PRO;
   }
 
   if (normalized === MENU_BUTTONS.TERABOX_DASHBOARD.toLowerCase()) {
@@ -1025,19 +1025,20 @@ function formatTeraboxApiPayload(payload) {
 function helpText() {
   return [
     'Kirim link biasa untuk dibuat shortlink Droplink.',
-    'Kirim link TeraBox untuk diproses lewat mode Convert TeraBox.',
+    'Kirim link TeraBox untuk diproses lewat mode TeraBox Pro.',
     '',
     'Contoh:',
     '/short https://example.com',
     '/short https://example.com nama-alias',
     '/short https://example.com alias=nama-alias',
+    '/terabox_pro https://1024terabox.com/s/xxxxx',
     '/terabox https://1024terabox.com/s/xxxxx',
     '/terabox_dashboard',
     '/terabox_connect',
     '/terabox_status',
     '/terabox_logout',
     '',
-    'Catatan: Convert TeraBox memerlukan TERABOX_RESHARE_API_URL dan API key dari provider yang kamu pakai.'
+    'Catatan: TeraBox Pro memerlukan TERABOX_RESHARE_API_URL dan API key dari provider yang kamu pakai.'
   ].join('\n');
 }
 
@@ -1046,7 +1047,7 @@ function menuText() {
     'Pilih menu:',
     '',
     `${MENU_BUTTONS.SHORTEN} - buat shortlink Droplink`,
-    `${MENU_BUTTONS.TERABOX} - ambil metadata/download link TeraBox`,
+    `${MENU_BUTTONS.TERABOX_PRO} - ambil metadata/download link TeraBox`,
     `${MENU_BUTTONS.TERABOX_DASHBOARD} - kelola session pribadi`,
     `${MENU_BUTTONS.HELP} - lihat bantuan`
   ].join('\n');
@@ -1055,7 +1056,7 @@ function menuText() {
 function menuKeyboard() {
   return {
     keyboard: [
-      [{ text: MENU_BUTTONS.SHORTEN }, { text: MENU_BUTTONS.TERABOX }],
+      [{ text: MENU_BUTTONS.SHORTEN }, { text: MENU_BUTTONS.TERABOX_PRO }],
       [{ text: MENU_BUTTONS.TERABOX_DASHBOARD }, { text: MENU_BUTTONS.HELP }]
     ],
     resize_keyboard: true,
@@ -1081,7 +1082,7 @@ function teraboxDashboardKeyboard() {
     keyboard: [
       [{ text: MENU_BUTTONS.TERABOX_CONNECT }, { text: MENU_BUTTONS.TERABOX_STATUS }],
       [{ text: MENU_BUTTONS.TERABOX_DISCONNECT }],
-      [{ text: MENU_BUTTONS.SHORTEN }, { text: MENU_BUTTONS.TERABOX }],
+      [{ text: MENU_BUTTONS.SHORTEN }, { text: MENU_BUTTONS.TERABOX_PRO }],
       [{ text: MENU_BUTTONS.TERABOX_DASHBOARD }, { text: MENU_BUTTONS.HELP }]
     ],
     resize_keyboard: true,
