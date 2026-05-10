@@ -1,0 +1,14 @@
+{
+  "name": "tuna-droplink-telegram-bot",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Telegram bot for auto-shortening URLs through the Droplink.co API.",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node src/index.js",
+    "check": "node --check src/index.js"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
