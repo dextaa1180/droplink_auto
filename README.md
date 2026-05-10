@@ -4,11 +4,11 @@ Bot Telegram untuk auto-shortener link lewat API Droplink.co.
 
 ## Fitur
 
-- Menu tombol Telegram: `Shorten Link`, `Pindah TeraBox`, `Dashboard TeraBox`, dan `Bantuan`.
+- Menu tombol Telegram: `Shorten Link`, `Convert TeraBox`, `Dashboard TeraBox`, dan `Bantuan`.
 - Auto deteksi URL dari pesan teks dan caption.
 - Command `/short <url>` untuk shorten manual.
 - Alias custom: `/short https://example.com nama-alias` atau `/short https://example.com alias=nama-alias`.
-- Mode `/terabox <url>` untuk meneruskan link TeraBox ke API re-share milikmu.
+- Mode `/terabox <url>` untuk convert link TeraBox lewat API provider seperti xAPIverse.
 - Dashboard session TeraBox pribadi: hubungkan, cek status, dan putus session melalui endpoint resmi/authorized.
 - Bisa dibatasi hanya user/chat tertentu lewat `ALLOWED_USER_IDS` dan `ALLOWED_CHAT_IDS`.
 - Long polling, jadi tidak perlu webhook.
@@ -56,25 +56,49 @@ ALLOWED_USER_IDS=123456789,987654321
 
 `REQUEST_TIMEOUT_MS` opsional. Default `15000`.
 
-`TERABOX_RESHARE_API_URL` opsional. Endpoint API milikmu untuk memindahkan/share ulang link TeraBox. Bot akan mengirim request:
+`TERABOX_RESHARE_API_URL` opsional. Endpoint API untuk convert link TeraBox. Untuk xAPIverse TeraBox Pro, isi:
+
+```env
+TERABOX_RESHARE_API_URL=https://xapiverse.com/api/terabox-pro
+TERABOX_RESHARE_API_KEY=api_key_xapiverse_kamu
+TERABOX_RESHARE_API_KEY_HEADER=xAPIverse-Key
+```
+
+Bot akan mengirim request:
 
 ```http
 POST TERABOX_RESHARE_API_URL
 Content-Type: application/json
+xAPIverse-Key: TERABOX_RESHARE_API_KEY
 
-{"url":"https://1024terabox.com/s/xxxxx","action":"reshare"}
+{"url":"https://1024terabox.com/s/xxxxx"}
 ```
 
-Response yang didukung:
+Response xAPIverse yang didukung:
 
 ```json
 {
   "status": "success",
-  "shareUrl": "https://1024terabox.com/s/link-baru"
+  "total_files": 1,
+  "list": [
+    {
+      "name": "video_example.mp4",
+      "size_formatted": "41.16 MB",
+      "normal_dlink": "https://api.iteraplay.com/download?token=...",
+      "zip_dlink": "https://api.iteraplay.com/download?token=...",
+      "fast_stream_url": {
+        "720p": "https://api.iteraplay.com/fast_stream?token=..."
+      }
+    }
+  ]
 }
 ```
 
-`TERABOX_RESHARE_API_KEY` opsional. Jika diisi, bot mengirim header `Authorization: Bearer ...` dan `x-api-key`.
+Bot juga masih mendukung response lama berbentuk `shareUrl` jika nanti kamu memakai endpoint lain yang benar-benar membuat link share baru.
+
+`TERABOX_RESHARE_API_KEY` opsional. Untuk xAPIverse, isi API key dari dashboard xAPIverse.
+
+`TERABOX_RESHARE_API_KEY_HEADER` opsional. Default `xAPIverse-Key`.
 
 `TERABOX_RESHARE_REQUIRE_SESSION` opsional. Isi `true` jika endpoint re-share wajib memakai session yang sudah terhubung dari dashboard.
 
@@ -161,7 +185,7 @@ Untuk TeraBox:
 /terabox_logout
 ```
 
-Atau klik tombol `Pindah TeraBox`, lalu kirim link TeraBox.
+Atau klik tombol `Convert TeraBox`, lalu kirim link TeraBox.
 
 Untuk dashboard session pribadi, klik `Dashboard TeraBox`, lalu pilih `Hubungkan TeraBox`. Jika endpoint session mengembalikan `qrImageUrl`, bot akan mengirim barcode/QR login ke chat private.
 
@@ -186,4 +210,6 @@ Simpan API key hanya di `.env`. Jangan kirim API key ke chat Telegram atau commi
 
 Bot hanya menyimpan metadata session seperti `sessionId`, status, nama akun, dan expiry. Jangan membuat endpoint yang mengirim cookie atau password mentah ke bot.
 
-Fitur `Pindah TeraBox` dan dashboard session hanya kerangka integrasi ke API resmi/authorized milikmu. Gunakan hanya untuk file yang kamu miliki atau punya izin untuk salin dan share ulang.
+Fitur `Convert TeraBox` dengan xAPIverse menghasilkan metadata, download link, dan stream link. Itu bukan endpoint resmi untuk memindahkan file ke akun TeraBox kamu atau membuat share link baru dari akun kamu.
+
+Dashboard session hanya kerangka integrasi ke API resmi/authorized milikmu. Gunakan hanya untuk file yang kamu miliki atau punya izin untuk salin dan share ulang.

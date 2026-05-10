@@ -18,7 +18,7 @@ const MODES = {
 
 const MENU_BUTTONS = {
   SHORTEN: 'Shorten Link',
-  TERABOX: 'Pindah TeraBox',
+  TERABOX: 'Convert TeraBox',
   TERABOX_DASHBOARD: 'Dashboard TeraBox',
   TERABOX_CONNECT: 'Hubungkan TeraBox',
   TERABOX_STATUS: 'Status Session',
@@ -154,7 +154,7 @@ async function handleCommand(message, command) {
     const urls = uniqueUrls(extractUrls(command.body).filter(isTeraboxUrl));
     if (urls.length === 0) {
       chatModes.set(String(chatId), MODES.TERABOX);
-      await reply(chatId, message.message_id, 'Mode Pindah TeraBox aktif. Kirim link TeraBox yang ingin diproses.');
+      await reply(chatId, message.message_id, 'Mode Convert TeraBox aktif. Kirim link TeraBox yang ingin diproses.');
       return;
     }
 
@@ -196,7 +196,7 @@ async function handleMenuAction(message, action) {
 
   if (action === MODES.TERABOX) {
     chatModes.set(String(chatId), MODES.TERABOX);
-    await reply(chatId, message.message_id, 'Mode Pindah TeraBox aktif. Kirim link TeraBox yang ingin dipindah dan dibagikan ulang.');
+    await reply(chatId, message.message_id, 'Mode Convert TeraBox aktif. Kirim link TeraBox untuk mengambil metadata, download link, dan stream link dari API.');
     return;
   }
 
@@ -267,8 +267,8 @@ async function reshareTeraboxAndReply(message, urls) {
   const results = [];
   for (const shareUrl of limitedUrls) {
     try {
-      const newShareUrl = await reshareTeraboxLink(shareUrl, message);
-      results.push({ shareUrl, newShareUrl });
+      const output = await reshareTeraboxLink(shareUrl, message);
+      results.push({ shareUrl, ...output });
     } catch (error) {
       results.push({ shareUrl, error: error.message });
     }
@@ -279,7 +279,7 @@ async function reshareTeraboxAndReply(message, urls) {
 
 async function reshareTeraboxLink(shareUrl, message) {
   if (!config.teraboxReshareApiUrl) {
-    throw new Error('Fitur Pindah TeraBox belum dikonfigurasi. Isi TERABOX_RESHARE_API_URL di .env dengan API resmi/endpoint milikmu.');
+    throw new Error('Fitur Convert TeraBox belum dikonfigurasi. Isi TERABOX_RESHARE_API_URL di .env.');
   }
 
   const session = getMessageUserSession(message);
@@ -294,20 +294,23 @@ async function reshareTeraboxLink(shareUrl, message) {
   };
 
   if (config.teraboxReshareApiKey) {
-    headers.authorization = `Bearer ${config.teraboxReshareApiKey}`;
-    headers['x-api-key'] = config.teraboxReshareApiKey;
+    headers[config.teraboxReshareApiKeyHeader] = config.teraboxReshareApiKey;
+  }
+
+  const requestBody = {
+    url: shareUrl
+  };
+
+  if (config.teraboxReshareRequireSession) {
+    requestBody.sessionId = session ? session.sessionId : undefined;
+    requestBody.telegramUserId = message.from ? String(message.from.id) : undefined;
+    requestBody.telegramChatId = String(message.chat.id);
   }
 
   const response = await fetch(config.teraboxReshareApiUrl, {
     method: 'POST',
     headers,
-    body: JSON.stringify({
-      url: shareUrl,
-      action: 'reshare',
-      sessionId: session ? session.sessionId : undefined,
-      telegramUserId: message.from ? String(message.from.id) : undefined,
-      telegramChatId: String(message.chat.id)
-    }),
+    body: JSON.stringify(requestBody),
     signal: AbortSignal.timeout(config.requestTimeoutMs)
   });
 
@@ -323,11 +326,16 @@ async function reshareTeraboxLink(shareUrl, message) {
   }
 
   const newShareUrl = findTeraboxShareUrl(payload, body);
-  if (!newShareUrl) {
-    throw new Error('Response TeraBox API tidak berisi shareUrl baru.');
+  if (newShareUrl) {
+    return { newShareUrl };
   }
 
-  return newShareUrl;
+  const detailsText = formatTeraboxApiPayload(payload);
+  if (detailsText) {
+    return { detailsText };
+  }
+
+  throw new Error('Response TeraBox API tidak berisi data yang dikenali.');
 }
 
 async function sendTeraboxDashboard(message) {
@@ -615,6 +623,7 @@ function readConfig() {
     requestTimeoutMs: parsePositiveInt(process.env.REQUEST_TIMEOUT_MS, 15000),
     teraboxReshareApiUrl: optionalUrl(process.env.TERABOX_RESHARE_API_URL || '', 'TERABOX_RESHARE_API_URL'),
     teraboxReshareApiKey: (process.env.TERABOX_RESHARE_API_KEY || '').trim(),
+    teraboxReshareApiKeyHeader: cleanHeaderName(process.env.TERABOX_RESHARE_API_KEY_HEADER || 'xAPIverse-Key'),
     teraboxReshareRequireSession: parseBool(process.env.TERABOX_RESHARE_REQUIRE_SESSION, false),
     teraboxSessionStartApiUrl: optionalUrl(process.env.TERABOX_SESSION_START_API_URL || '', 'TERABOX_SESSION_START_API_URL'),
     teraboxSessionStatusApiUrl: optionalUrl(process.env.TERABOX_SESSION_STATUS_API_URL || '', 'TERABOX_SESSION_STATUS_API_URL'),
@@ -708,6 +717,10 @@ function parseMenuButton(text) {
   }
 
   if (normalized === MENU_BUTTONS.TERABOX.toLowerCase()) {
+    return MODES.TERABOX;
+  }
+
+  if (normalized === 'pindah terabox') {
     return MODES.TERABOX;
   }
 
@@ -938,19 +951,81 @@ function formatTeraboxResults(results) {
     return results[0].newShareUrl;
   }
 
+  if (results.length === 1 && results[0].detailsText) {
+    return results[0].detailsText;
+  }
+
   return results.map((result, index) => {
     if (result.newShareUrl) {
       return `${index + 1}. ${result.shareUrl}\n=> ${result.newShareUrl}`;
+    }
+
+    if (result.detailsText) {
+      return `${index + 1}. ${result.shareUrl}\n${result.detailsText}`;
     }
 
     return `${index + 1}. ${result.shareUrl}\nGagal: ${result.error}`;
   }).join('\n\n');
 }
 
+function formatTeraboxApiPayload(payload) {
+  if (!payload || typeof payload !== 'object') {
+    return '';
+  }
+
+  const files = Array.isArray(payload.list) ? payload.list : [];
+  if (files.length === 0) {
+    return '';
+  }
+
+  const lines = [
+    `Status: ${payload.status || 'success'}`,
+    `Total file: ${payload.total_files || files.length}`
+  ];
+
+  files.slice(0, config.maxUrlsPerMessage).forEach((file, index) => {
+    lines.push('', `${index + 1}. ${file.name || 'Tanpa nama'}`);
+    if (file.size_formatted) {
+      lines.push(`Size: ${file.size_formatted}`);
+    }
+
+    if (file.type) {
+      lines.push(`Type: ${file.type}`);
+    }
+
+    if (file.quality) {
+      lines.push(`Quality: ${file.quality}`);
+    }
+
+    if (file.duration) {
+      lines.push(`Duration: ${file.duration}`);
+    }
+
+    if (file.normal_dlink) {
+      lines.push(`Download: ${file.normal_dlink}`);
+    }
+
+    if (file.zip_dlink) {
+      lines.push(`Zip: ${file.zip_dlink}`);
+    }
+
+    const streamUrl = pickStreamUrl(file.fast_stream_url);
+    if (streamUrl) {
+      lines.push(`Stream: ${streamUrl}`);
+    }
+  });
+
+  if (payload.folder_zip_dlink) {
+    lines.push('', `Folder zip: ${payload.folder_zip_dlink}`);
+  }
+
+  return truncateTelegramMessage(lines.join('\n'));
+}
+
 function helpText() {
   return [
     'Kirim link biasa untuk dibuat shortlink Droplink.',
-    'Kirim link TeraBox untuk diproses lewat mode Pindah TeraBox.',
+    'Kirim link TeraBox untuk diproses lewat mode Convert TeraBox.',
     '',
     'Contoh:',
     '/short https://example.com',
@@ -962,7 +1037,7 @@ function helpText() {
     '/terabox_status',
     '/terabox_logout',
     '',
-    'Catatan: Pindah TeraBox memerlukan TERABOX_RESHARE_API_URL dan hanya untuk file yang kamu punya izin untuk salin/share ulang.'
+    'Catatan: Convert TeraBox memerlukan TERABOX_RESHARE_API_URL dan API key dari provider yang kamu pakai.'
   ].join('\n');
 }
 
@@ -971,7 +1046,7 @@ function menuText() {
     'Pilih menu:',
     '',
     `${MENU_BUTTONS.SHORTEN} - buat shortlink Droplink`,
-    `${MENU_BUTTONS.TERABOX} - pindah/share ulang link TeraBox`,
+    `${MENU_BUTTONS.TERABOX} - ambil metadata/download link TeraBox`,
     `${MENU_BUTTONS.TERABOX_DASHBOARD} - kelola session pribadi`,
     `${MENU_BUTTONS.HELP} - lihat bantuan`
   ].join('\n');
@@ -1143,6 +1218,15 @@ function parseBool(value, fallback) {
   return ['1', 'true', 'yes', 'y', 'on'].includes(String(value).trim().toLowerCase());
 }
 
+function cleanHeaderName(value) {
+  const clean = String(value || '').trim();
+  if (!/^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/.test(clean)) {
+    throw new Error('TERABOX_RESHARE_API_KEY_HEADER harus nama header HTTP yang valid.');
+  }
+
+  return clean;
+}
+
 function cleanBaseUrl(value) {
   const url = new URL(value);
   if (url.protocol !== 'http:' && url.protocol !== 'https:') {
@@ -1287,6 +1371,27 @@ function escapeRegExp(value) {
 function truncate(value, length = 180) {
   const clean = String(value || '').replace(/\s+/g, ' ').trim();
   return clean.length > length ? `${clean.slice(0, length)}...` : clean;
+}
+
+function truncateTelegramMessage(value, limit = 3900) {
+  const text = String(value || '');
+  return text.length > limit ? `${text.slice(0, limit - 24)}\n\n...dipotong oleh bot.` : text;
+}
+
+function pickStreamUrl(streams) {
+  if (!streams || typeof streams !== 'object') {
+    return '';
+  }
+
+  const preferredQualities = ['1080p', '720p', '480p', '360p'];
+  for (const quality of preferredQualities) {
+    if (typeof streams[quality] === 'string' && streams[quality]) {
+      return streams[quality];
+    }
+  }
+
+  const first = Object.values(streams).find((value) => typeof value === 'string' && value);
+  return first || '';
 }
 
 function sleep(ms) {
