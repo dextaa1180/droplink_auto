@@ -1,7 +1,9 @@
 'use strict';
 
+const crypto = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
+const { buildPostText, createPostDraft, setDraftField, setDraftStep } = require('./post-builder');
 const { convertTeraboxShare } = require('./terabox-converter');
 const { DEFAULT_LOGIN_URL, loginWithQrCode } = require('./terabox-login');
 
@@ -12,15 +14,22 @@ const telegramBaseUrl = `https://api.telegram.org/bot${config.telegramBotToken}`
 const droplinkHost = safeHost(config.droplinkBaseUrl);
 const chatModes = new Map();
 const teraboxSessions = loadSessionStore(config.sessionStorePath);
+const postChannels = loadChannelStore(config.postChannelStorePath);
+const postShops = loadLinkStore(config.postShopStorePath, 'shops');
+const postMicrosites = loadLinkStore(config.postMicrositeStorePath, 'microsites');
 const activeTeraboxLogins = new Map();
+const postDrafts = new Map();
+const postActionLinks = new Map();
 
 const MODES = {
   SHORTEN: 'shorten',
   TERABOX_PRO: 'terabox_pro',
-  TERABOX_CONVERT: 'terabox_convert'
+  TERABOX_CONVERT: 'terabox_convert',
+  POST_BUILDER: 'post_builder'
 };
 
 const MENU_BUTTONS = {
+  BUAT_POST: 'Buat Post',
   SHORTEN: 'Shorten Link',
   TERABOX_PRO: 'TeraBox Pro',
   TERABOX_CONVERT: 'Convert TeraBox',
@@ -29,6 +38,18 @@ const MENU_BUTTONS = {
   TERABOX_CONNECT: 'Hubungkan TeraBox',
   TERABOX_STATUS: 'Status Session',
   TERABOX_DISCONNECT: 'Putus Session',
+  POST_CANCEL: 'Batal Post',
+  POST_SKIP_PREVIEW: 'Lewati Preview',
+  POST_SKIP_SHOP: 'Lewati Shop',
+  POST_SKIP_MICROSITE: 'Lewati Microsite',
+  POST_SEND: 'Kirim ke Channel',
+  POST_EDIT: 'Edit Post',
+  POST_EDIT_DESCRIPTION: 'Edit Deskripsi',
+  POST_EDIT_PREVIEW: 'Edit Preview',
+  POST_EDIT_CONTENT: 'Edit Link Konten',
+  POST_EDIT_SHOP: 'Edit Shop',
+  POST_EDIT_MICROSITE: 'Edit Microsite',
+  POST_BACK_REVIEW: 'Kembali Preview',
   HELP: 'Bantuan'
 };
 
@@ -63,7 +84,7 @@ async function main() {
       const updates = await telegram('getUpdates', {
         offset: updateOffset,
         timeout: 50,
-        allowed_updates: ['message', 'channel_post']
+        allowed_updates: ['message', 'channel_post', 'callback_query']
       }, 65000);
 
       for (const update of updates) {
@@ -80,6 +101,11 @@ async function main() {
 }
 
 async function handleUpdate(update) {
+  if (update.callback_query) {
+    await handleCallbackQuery(update.callback_query);
+    return;
+  }
+
   const message = update.message || update.channel_post;
   if (!message) {
     return;
@@ -99,15 +125,20 @@ async function handleUpdate(update) {
     return;
   }
 
-  const menuAction = parseMenuButton(text);
-  if (menuAction) {
-    await handleMenuAction(message, menuAction);
-    return;
-  }
-
   const command = parseCommand(text);
   if (command) {
     await handleCommand(message, command);
+    return;
+  }
+
+  if (postDrafts.has(getPostDraftKey(message))) {
+    await handlePostBuilderMessage(message, text);
+    return;
+  }
+
+  const menuAction = parseMenuButton(text);
+  if (menuAction) {
+    await handleMenuAction(message, menuAction);
     return;
   }
 
@@ -151,13 +182,74 @@ async function handleCommand(message, command) {
   const chatId = message.chat.id;
 
   if (command.name === 'start' || command.name === 'menu') {
+    postDrafts.delete(getPostDraftKey(message));
     chatModes.delete(String(chatId));
     await sendMenu(chatId, message.message_id);
     return;
   }
 
+  if (command.name === 'batal' || command.name === 'cancel') {
+    if (postDrafts.delete(getPostDraftKey(message))) {
+      chatModes.delete(String(chatId));
+      await reply(chatId, message.message_id, 'Draft post dibatalkan.', {
+        reply_markup: menuKeyboard()
+      });
+      return;
+    }
+  }
+
   if (command.name === 'help') {
     await reply(chatId, message.message_id, helpText());
+    return;
+  }
+
+  if (command.name === 'buatpost' || command.name === 'buat_post' || command.name === 'post') {
+    await startManualPostBuilder(message);
+    return;
+  }
+
+  if (command.name === 'addchannel' || command.name === 'add_channel') {
+    await addPostChannel(message, command.body);
+    return;
+  }
+
+  if (command.name === 'listchannel' || command.name === 'list_channel') {
+    await listPostChannels(message);
+    return;
+  }
+
+  if (command.name === 'deletechannel' || command.name === 'delete_channel' || command.name === 'delchannel') {
+    await deletePostChannel(message, command.body);
+    return;
+  }
+
+  if (command.name === 'addshop' || command.name === 'add_shop') {
+    await addPostLinkItem(message, command.body, 'shop');
+    return;
+  }
+
+  if (command.name === 'listshop' || command.name === 'list_shop') {
+    await listPostLinkItems(message, 'shop');
+    return;
+  }
+
+  if (command.name === 'deleteshop' || command.name === 'delete_shop' || command.name === 'delshop') {
+    await deletePostLinkItem(message, command.body, 'shop');
+    return;
+  }
+
+  if (command.name === 'addmicrosite' || command.name === 'add_micro' || command.name === 'add_microsite') {
+    await addPostLinkItem(message, command.body, 'microsite');
+    return;
+  }
+
+  if (command.name === 'listmicrosite' || command.name === 'list_micro' || command.name === 'list_microsite') {
+    await listPostLinkItems(message, 'microsite');
+    return;
+  }
+
+  if (command.name === 'deletemicrosite' || command.name === 'delete_micro' || command.name === 'delete_microsite' || command.name === 'delmicrosite') {
+    await deletePostLinkItem(message, command.body, 'microsite');
     return;
   }
 
@@ -227,6 +319,11 @@ async function handleCommand(message, command) {
 async function handleMenuAction(message, action) {
   const chatId = message.chat.id;
 
+  if (action === MODES.POST_BUILDER) {
+    await startManualPostBuilder(message);
+    return;
+  }
+
   if (action === MODES.SHORTEN) {
     chatModes.set(String(chatId), MODES.SHORTEN);
     await reply(chatId, message.message_id, 'Mode Shorten aktif. Kirim link yang ingin dibuat shortlink Droplink.');
@@ -273,6 +370,524 @@ async function handleMenuAction(message, action) {
   await reply(chatId, message.message_id, helpText(), {
     reply_markup: menuKeyboard()
   });
+}
+
+async function startManualPostBuilder(message, initial = {}) {
+  const chatId = message.chat.id;
+
+  if (!message.from || !message.from.id) {
+    await reply(chatId, message.message_id, 'Fitur buat post hanya bisa dipakai dari chat user.');
+    return;
+  }
+
+  const draft = createPostDraft(message.from.id, chatId, initial);
+  postDrafts.set(getPostDraftKey(message), draft);
+  chatModes.set(String(chatId), MODES.POST_BUILDER);
+
+  const intro = initial.contentLink ? [
+    'Mode Buat Post aktif.',
+    '',
+    `Link konten sudah terisi: ${initial.contentLink}`,
+    '',
+    'Kirim deskripsi konten untuk postingan ini.'
+  ] : [
+    'Mode Buat Post aktif.',
+    '',
+    'Kirim deskripsi konten untuk postingan ini.'
+  ];
+
+  await reply(chatId, message.message_id, intro.join('\n'), {
+    reply_markup: postBuilderKeyboard('description')
+  });
+}
+
+async function handlePostBuilderMessage(message, text) {
+  const chatId = message.chat.id;
+  const draftKey = getPostDraftKey(message);
+  let draft = postDrafts.get(draftKey);
+
+  if (!draft) {
+    return;
+  }
+
+  if (isPostCancelText(text)) {
+    postDrafts.delete(draftKey);
+    chatModes.delete(String(chatId));
+    await reply(chatId, message.message_id, 'Draft post dibatalkan.', {
+      reply_markup: menuKeyboard()
+    });
+    return;
+  }
+
+  if (isPostBackReviewText(text)) {
+    draft = clearDraftEdit(setDraftStep(draft, 'review'));
+    postDrafts.set(draftKey, draft);
+    await sendPostDraftReview(message, draft);
+    return;
+  }
+
+  if (text.trim().toLowerCase() === MENU_BUTTONS.POST_EDIT.toLowerCase()) {
+    draft = setDraftStep(draft, 'edit_select');
+    postDrafts.set(draftKey, draft);
+    await reply(chatId, message.message_id, 'Pilih bagian yang mau diedit.', {
+      reply_markup: postBuilderKeyboard('edit_select')
+    });
+    return;
+  }
+
+  if (draft.step === 'edit_select') {
+    await handlePostEditSelection(message, draft, text);
+    return;
+  }
+
+  if (draft.step === 'description') {
+    const description = text.trim();
+    if (!description) {
+      await reply(chatId, message.message_id, 'Deskripsi tidak boleh kosong. Kirim deskripsi konten.', {
+        reply_markup: postBuilderKeyboard('description')
+      });
+      return;
+    }
+
+    draft = setDraftField(draft, 'description', description);
+    if (draft.editing) {
+      draft = clearDraftEdit(setDraftStep(draft, 'review'));
+      postDrafts.set(draftKey, draft);
+      await sendPostDraftReview(message, draft);
+      return;
+    }
+
+    draft = setDraftStep(draft, 'preview_link');
+    postDrafts.set(draftKey, draft);
+    await reply(chatId, message.message_id, 'Kirim link preview. Untuk sekarang masih manual.', {
+      reply_markup: postBuilderKeyboard('preview_link')
+    });
+    return;
+  }
+
+  if (draft.step === 'preview_link') {
+    const previewLink = text.trim().toLowerCase() === MENU_BUTTONS.POST_SKIP_PREVIEW.toLowerCase() ? '' : firstUrlFromText(text);
+    if (text.trim().toLowerCase() !== MENU_BUTTONS.POST_SKIP_PREVIEW.toLowerCase() && !previewLink) {
+      await reply(chatId, message.message_id, 'Kirim link preview yang valid, atau pilih Lewati Preview.', {
+        reply_markup: postBuilderKeyboard('preview_link')
+      });
+      return;
+    }
+
+    draft = setDraftField(draft, 'previewLink', previewLink);
+    if (draft.editing) {
+      draft = clearDraftEdit(setDraftStep(draft, 'review'));
+      postDrafts.set(draftKey, draft);
+      await sendPostDraftReview(message, draft);
+      return;
+    }
+
+    const nextStep = draft.contentLink ? 'shop_link' : 'content_link';
+    draft = setDraftStep(draft, nextStep);
+    postDrafts.set(draftKey, draft);
+
+    if (nextStep === 'shop_link') {
+      await startPostLinkSelection(message, draft, 'shop');
+      return;
+    }
+
+    await reply(chatId, message.message_id, 'Kirim link konten untuk postingan ini.', {
+      reply_markup: postBuilderKeyboard('content_link')
+    });
+    return;
+  }
+
+  if (draft.step === 'content_link') {
+    const contentLink = firstUrlFromText(text);
+    if (!contentLink) {
+      await reply(chatId, message.message_id, 'Kirim link konten yang valid.', {
+        reply_markup: postBuilderKeyboard('content_link')
+      });
+      return;
+    }
+
+    draft = setDraftField(draft, 'contentLink', contentLink);
+    if (draft.editing) {
+      draft = clearDraftEdit(setDraftStep(draft, 'review'));
+      postDrafts.set(draftKey, draft);
+      await sendPostDraftReview(message, draft);
+      return;
+    }
+
+    draft = setDraftStep(draft, 'shop_link');
+    postDrafts.set(draftKey, draft);
+    await startPostLinkSelection(message, draft, 'shop');
+    return;
+  }
+
+  if (draft.step === 'shop_link') {
+    if (text.trim().toLowerCase() === MENU_BUTTONS.POST_SKIP_SHOP.toLowerCase()) {
+      draft = setDraftField(draft, 'shopLink', '');
+      if (draft.editing) {
+        draft = clearDraftEdit(setDraftStep(draft, 'review'));
+        postDrafts.set(draftKey, draft);
+        await sendPostDraftReview(message, draft);
+        return;
+      }
+
+      draft = setDraftStep(draft, 'microsite_link');
+      postDrafts.set(draftKey, draft);
+      await startPostLinkSelection(message, draft, 'microsite');
+      return;
+    }
+
+    const shop = findPostLinkItemByButtonText(text, 'shop');
+    if (!shop) {
+      await reply(chatId, message.message_id, 'Pilih shop dari tombol yang tersedia, atau pilih Lewati Shop.', {
+        reply_markup: postBuilderKeyboard('shop_link')
+      });
+      return;
+    }
+
+    draft = setDraftField(draft, 'shopLink', shop.url);
+    if (draft.editing) {
+      draft = clearDraftEdit(setDraftStep(draft, 'review'));
+      postDrafts.set(draftKey, draft);
+      await sendPostDraftReview(message, draft);
+      return;
+    }
+
+    draft = setDraftStep(draft, 'microsite_link');
+    postDrafts.set(draftKey, draft);
+    await startPostLinkSelection(message, draft, 'microsite');
+    return;
+  }
+
+  if (draft.step === 'microsite_link') {
+    if (text.trim().toLowerCase() === MENU_BUTTONS.POST_SKIP_MICROSITE.toLowerCase()) {
+      draft = setDraftStep(setDraftField(draft, 'micrositeLink', ''), 'review');
+      draft = clearDraftEdit(draft);
+      postDrafts.set(draftKey, draft);
+      await sendPostDraftReview(message, draft);
+      return;
+    }
+
+    const microsite = findPostLinkItemByButtonText(text, 'microsite');
+    if (!microsite) {
+      await reply(chatId, message.message_id, 'Pilih microsite dari tombol yang tersedia, atau pilih Lewati Microsite.', {
+        reply_markup: postBuilderKeyboard('microsite_link')
+      });
+      return;
+    }
+
+    draft = clearDraftEdit(setDraftStep(setDraftField(draft, 'micrositeLink', microsite.url), 'review'));
+    postDrafts.set(draftKey, draft);
+    await sendPostDraftReview(message, draft);
+    return;
+  }
+
+  if (draft.step === 'review') {
+    if (text.trim().toLowerCase() === MENU_BUTTONS.POST_SEND.toLowerCase()) {
+      await startPostChannelSelection(message, draft);
+      return;
+    }
+
+    await reply(chatId, message.message_id, 'Pilih Kirim ke Channel, Edit Post, atau Batal Post.', {
+      reply_markup: postBuilderKeyboard('review')
+    });
+    return;
+  }
+
+  if (draft.step === 'channel_select') {
+    const channel = findPostChannelByButtonText(text);
+    if (!channel) {
+      await reply(chatId, message.message_id, 'Pilih channel dari tombol yang tersedia.', {
+        reply_markup: postChannelSelectKeyboard()
+      });
+      return;
+    }
+
+    draft = setDraftField(draft, 'channelId', channel.id);
+    postDrafts.set(draftKey, draft);
+    await publishPostDraft(message, draft, channel);
+  }
+}
+
+async function handlePostEditSelection(message, draft, text) {
+  const chatId = message.chat.id;
+  const draftKey = getPostDraftKey(message);
+  const normalized = text.trim().toLowerCase();
+
+  if (normalized === MENU_BUTTONS.POST_EDIT_DESCRIPTION.toLowerCase()) {
+    draft = setDraftEditStep(draft, 'description', 'description');
+    postDrafts.set(draftKey, draft);
+    await reply(chatId, message.message_id, 'Kirim deskripsi baru.', {
+      reply_markup: postBuilderKeyboard('description', draft)
+    });
+    return;
+  }
+
+  if (normalized === MENU_BUTTONS.POST_EDIT_PREVIEW.toLowerCase()) {
+    draft = setDraftEditStep(draft, 'preview_link', 'previewLink');
+    postDrafts.set(draftKey, draft);
+    await reply(chatId, message.message_id, 'Kirim link preview baru, atau pilih Lewati Preview.', {
+      reply_markup: postBuilderKeyboard('preview_link', draft)
+    });
+    return;
+  }
+
+  if (normalized === MENU_BUTTONS.POST_EDIT_CONTENT.toLowerCase()) {
+    draft = setDraftEditStep(draft, 'content_link', 'contentLink');
+    postDrafts.set(draftKey, draft);
+    await reply(chatId, message.message_id, 'Kirim link konten baru.', {
+      reply_markup: postBuilderKeyboard('content_link', draft)
+    });
+    return;
+  }
+
+  if (normalized === MENU_BUTTONS.POST_EDIT_SHOP.toLowerCase()) {
+    draft = setDraftEditStep(draft, 'shop_link', 'shopLink');
+    postDrafts.set(draftKey, draft);
+    await startPostLinkSelection(message, draft, 'shop');
+    return;
+  }
+
+  if (normalized === MENU_BUTTONS.POST_EDIT_MICROSITE.toLowerCase()) {
+    draft = setDraftEditStep(draft, 'microsite_link', 'micrositeLink');
+    postDrafts.set(draftKey, draft);
+    await startPostLinkSelection(message, draft, 'microsite');
+    return;
+  }
+
+  await reply(chatId, message.message_id, 'Pilih bagian yang mau diedit dari tombol.', {
+    reply_markup: postBuilderKeyboard('edit_select')
+  });
+}
+
+async function handleCallbackQuery(callbackQuery) {
+  const data = callbackQuery.data || '';
+  const message = callbackQuery.message;
+  const userId = callbackQuery.from && callbackQuery.from.id;
+  const chatId = message && message.chat && message.chat.id;
+
+  if (!message || !chatId) {
+    await answerCallbackQuery(callbackQuery.id, 'Pesan tombol tidak ditemukan.');
+    return;
+  }
+
+  if (!isAllowedTarget(userId, String(chatId))) {
+    await answerCallbackQuery(callbackQuery.id, 'Bot ini privat.', true);
+    return;
+  }
+
+  if (data.startsWith('post_from_link:')) {
+    const token = data.slice('post_from_link:'.length);
+    const contentLink = takePostActionLink(token);
+
+    if (!contentLink) {
+      await answerCallbackQuery(callbackQuery.id, 'Tombol sudah expired. Jalankan converter lagi.', true);
+      return;
+    }
+
+    await answerCallbackQuery(callbackQuery.id, 'Link konten masuk ke draft post.');
+    await startManualPostBuilder({
+      ...message,
+      from: callbackQuery.from
+    }, {
+      contentLink
+    });
+    return;
+  }
+
+  await answerCallbackQuery(callbackQuery.id, 'Aksi tombol tidak dikenal.');
+}
+
+async function sendPostDraftReview(message, draft) {
+  const postText = buildPostText(draft, {
+    timeZone: config.postTimeZone
+  });
+
+  await reply(message.chat.id, message.message_id, [
+    'Preview post:',
+    '',
+    postText
+  ].join('\n'), {
+    reply_markup: postBuilderKeyboard('review')
+  });
+}
+
+async function publishPostDraft(message, draft, channel = resolveSinglePostChannel()) {
+  const chatId = message.chat.id;
+  const draftKey = getPostDraftKey(message);
+  if (!channel || !channel.id) {
+    await reply(chatId, message.message_id, 'Belum ada channel tujuan. Tambahkan dulu dengan /addchannel.', {
+      reply_markup: postBuilderKeyboard('review')
+    });
+    return;
+  }
+
+  const postText = buildPostText(draft, {
+    timeZone: config.postTimeZone
+  });
+
+  await sendMessage(channel.id, postText);
+  postDrafts.delete(draftKey);
+  chatModes.delete(String(chatId));
+
+  await reply(chatId, message.message_id, `Post sudah terkirim ke ${channel.name}.`, {
+    reply_markup: menuKeyboard()
+  });
+}
+
+async function startPostChannelSelection(message, draft) {
+  const chatId = message.chat.id;
+  const channels = getPostChannels();
+
+  if (channels.length === 0) {
+    await reply(chatId, message.message_id, [
+      'Belum ada channel di database.',
+      '',
+      'Tambahkan dulu dengan:',
+      '/addchannel -100xxxxxxxxxx Nama Channel'
+    ].join('\n'), {
+      reply_markup: postBuilderKeyboard('review')
+    });
+    return;
+  }
+
+  if (channels.length === 1) {
+    await publishPostDraft(message, draft, channels[0]);
+    return;
+  }
+
+  const draftKey = getPostDraftKey(message);
+  postDrafts.set(draftKey, setDraftStep(draft, 'channel_select'));
+  await reply(chatId, message.message_id, 'Pilih channel tujuan:', {
+    reply_markup: postChannelSelectKeyboard()
+  });
+}
+
+async function addPostChannel(message, body) {
+  const parsed = parseAddChannelBody(body);
+  if (!parsed) {
+    await reply(message.chat.id, message.message_id, [
+      'Format:',
+      '/addchannel -100xxxxxxxxxx Nama Channel',
+      '/addchannel @usernamechannel Nama Channel'
+    ].join('\n'));
+    return;
+  }
+
+  try {
+    const validated = await validateBotChannelAdmin(parsed.id);
+    const channelName = parsed.name === parsed.id ? (validated.title || parsed.name) : parsed.name;
+    const channel = upsertPostChannel(parsed.id, channelName);
+    await reply(message.chat.id, message.message_id, [
+      'Channel tersimpan:',
+      formatPostChannel(channel),
+      '',
+      `Status bot: ${validated.status}`
+    ].join('\n'));
+  } catch (error) {
+    await reply(message.chat.id, message.message_id, [
+      'Channel belum disimpan.',
+      '',
+      error.message,
+      '',
+      'Pastikan bot sudah ditambahkan sebagai admin channel, lalu ulangi /addchannel.'
+    ].join('\n'));
+  }
+}
+
+async function listPostChannels(message) {
+  const channels = getPostChannels();
+  if (channels.length === 0) {
+    await reply(message.chat.id, message.message_id, 'Belum ada channel tersimpan. Pakai /addchannel untuk menambahkan.');
+    return;
+  }
+
+  await reply(message.chat.id, message.message_id, [
+    'Daftar channel:',
+    '',
+    ...channels.map((channel, index) => `${index + 1}. ${formatPostChannel(channel)}`)
+  ].join('\n'));
+}
+
+async function deletePostChannel(message, body) {
+  const query = String(body || '').trim();
+  if (!query) {
+    await reply(message.chat.id, message.message_id, 'Format: /deletechannel <nomor|channel_id|@username>');
+    return;
+  }
+
+  const removed = removePostChannel(query);
+  if (!removed) {
+    await reply(message.chat.id, message.message_id, 'Channel tidak ditemukan. Cek daftar dengan /listchannel.');
+    return;
+  }
+
+  await reply(message.chat.id, message.message_id, `Channel dihapus:\n${formatPostChannel(removed)}`);
+}
+
+async function startPostLinkSelection(message, draft, type) {
+  const chatId = message.chat.id;
+  const items = getPostLinkItems(type);
+  const step = type === 'shop' ? 'shop_link' : 'microsite_link';
+
+  postDrafts.set(getPostDraftKey(message), setDraftStep(draft, step));
+  if (items.length === 0) {
+    await reply(chatId, message.message_id, [
+      `Belum ada ${postLinkLabel(type)} di database.`,
+      '',
+      `Tambahkan dulu dengan ${postLinkAddCommand(type)}, atau pilih tombol Lewati.`
+    ].join('\n'), {
+      reply_markup: postBuilderKeyboard(step)
+    });
+    return;
+  }
+
+  await reply(chatId, message.message_id, `Pilih ${postLinkLabel(type)} untuk post ini:`, {
+    reply_markup: postBuilderKeyboard(step)
+  });
+}
+
+async function addPostLinkItem(message, body, type) {
+  const parsed = parseAddLinkBody(body);
+  if (!parsed) {
+    await reply(message.chat.id, message.message_id, [
+      'Format:',
+      `${postLinkAddCommand(type)} https://example.com Nama Link`
+    ].join('\n'));
+    return;
+  }
+
+  const item = upsertPostLinkItem(type, parsed.url, parsed.name);
+  await reply(message.chat.id, message.message_id, `${postLinkTitle(type)} tersimpan:\n${formatPostLinkItem(item)}`);
+}
+
+async function listPostLinkItems(message, type) {
+  const items = getPostLinkItems(type);
+  if (items.length === 0) {
+    await reply(message.chat.id, message.message_id, `Belum ada ${postLinkLabel(type)} tersimpan. Pakai ${postLinkAddCommand(type)} untuk menambahkan.`);
+    return;
+  }
+
+  await reply(message.chat.id, message.message_id, [
+    `Daftar ${postLinkLabel(type)}:`,
+    '',
+    ...items.map((item, index) => `${index + 1}. ${formatPostLinkItem(item)}`)
+  ].join('\n'));
+}
+
+async function deletePostLinkItem(message, body, type) {
+  const query = String(body || '').trim();
+  if (!query) {
+    await reply(message.chat.id, message.message_id, `Format: ${postLinkDeleteCommand(type)} <nomor|url|nama>`);
+    return;
+  }
+
+  const removed = removePostLinkItem(type, query);
+  if (!removed) {
+    await reply(message.chat.id, message.message_id, `${postLinkTitle(type)} tidak ditemukan. Cek daftar dengan ${postLinkListCommand(type)}.`);
+    return;
+  }
+
+  await reply(message.chat.id, message.message_id, `${postLinkTitle(type)} dihapus:\n${formatPostLinkItem(removed)}`);
 }
 
 async function shortenAndReply(message, urls, alias) {
@@ -365,7 +980,9 @@ async function convertTeraboxAndReply(message, urls) {
     }
   }
 
-  await reply(chatId, message.message_id, formatTeraboxConvertResults(results));
+  await reply(chatId, message.message_id, formatTeraboxConvertResults(results), {
+    reply_markup: postFromResultsKeyboard(results)
+  });
 }
 
 async function reshareTeraboxLink(shareUrl, message) {
@@ -794,6 +1411,22 @@ async function sendMessage(chatId, text, options = {}) {
   });
 }
 
+async function answerCallbackQuery(callbackQueryId, text, showAlert = false) {
+  return telegram('answerCallbackQuery', {
+    callback_query_id: callbackQueryId,
+    text,
+    show_alert: showAlert
+  });
+}
+
+async function getBotInfo() {
+  if (!getBotInfo.promise) {
+    getBotInfo.promise = telegram('getMe', {});
+  }
+
+  return getBotInfo.promise;
+}
+
 async function sendMenu(chatId, replyToMessageId) {
   return reply(chatId, replyToMessageId, menuText(), {
     reply_markup: menuKeyboard()
@@ -811,6 +1444,10 @@ function readConfig() {
     droplinkBaseUrl,
     allowedUserIds: parseIdSet(process.env.ALLOWED_USER_IDS || ''),
     allowedChatIds: parseIdSet(process.env.ALLOWED_CHAT_IDS || ''),
+    postTimeZone: (process.env.POST_TIME_ZONE || 'Asia/Jakarta').trim(),
+    postChannelStorePath: resolveWorkspacePath(process.env.POST_CHANNEL_STORE_FILE || path.join(process.env.DATA_DIR || 'data', 'post-channels.json')),
+    postShopStorePath: resolveWorkspacePath(process.env.POST_SHOP_STORE_FILE || path.join(process.env.DATA_DIR || 'data', 'post-shops.json')),
+    postMicrositeStorePath: resolveWorkspacePath(process.env.POST_MICROSITE_STORE_FILE || path.join(process.env.DATA_DIR || 'data', 'post-microsites.json')),
     teraboxDashboardUserIds: parseIdSet(process.env.TERABOX_DASHBOARD_USER_IDS || ''),
     maxUrlsPerMessage: parsePositiveInt(process.env.MAX_URLS_PER_MESSAGE, 5),
     requestTimeoutMs: parsePositiveInt(process.env.REQUEST_TIMEOUT_MS, 15000),
@@ -914,6 +1551,10 @@ function parseShortCommand(body) {
 function parseMenuButton(text) {
   const normalized = text.trim().toLowerCase();
 
+  if (normalized === MENU_BUTTONS.BUAT_POST.toLowerCase()) {
+    return MODES.POST_BUILDER;
+  }
+
   if (normalized === MENU_BUTTONS.SHORTEN.toLowerCase()) {
     return MODES.SHORTEN;
   }
@@ -959,6 +1600,10 @@ function parseMenuButton(text) {
 
 function extractUrls(text) {
   return extractUrlMatches(text).map((item) => item.url);
+}
+
+function firstUrlFromText(text) {
+  return extractUrls(text)[0] || '';
 }
 
 function extractUrlMatches(text) {
@@ -1209,7 +1854,8 @@ function formatTeraboxResults(results) {
 function formatTeraboxConvertResults(results) {
   if (results.length === 1 && results[0].newShareUrl) {
     return [
-      results[0].newShareUrl,
+      '✅ Link berhasil dibuat',
+      `🔗 ${results[0].newShareUrl}`,
       '',
       `File/folder: ${results[0].fileCount}`,
       `Lokasi akun: ${formatSharePaths(results[0])}`
@@ -1299,6 +1945,16 @@ function helpText() {
     '/short https://example.com',
     '/short https://example.com nama-alias',
     '/short https://example.com alias=nama-alias',
+    '/buatpost',
+    '/addchannel -100xxxxxxxxxx Nama Channel',
+    '/listchannel',
+    '/deletechannel 1',
+    '/addshop https://shop.example Etalase Tuna',
+    '/listshop',
+    '/deleteshop 1',
+    '/addmicrosite https://site.example Konten Lain',
+    '/listmicrosite',
+    '/deletemicrosite 1',
     '/terabox_pro https://1024terabox.com/s/xxxxx',
     '/terabox https://1024terabox.com/s/xxxxx',
     '/convert_terabox https://1024terabox.com/s/xxxxx',
@@ -1317,6 +1973,7 @@ function menuText() {
   return [
     'Pilih menu:',
     '',
+    `${MENU_BUTTONS.BUAT_POST} - susun postingan channel manual`,
     `${MENU_BUTTONS.SHORTEN} - buat shortlink Droplink`,
     `${MENU_BUTTONS.TERABOX_PRO} - ambil metadata/download link TeraBox`,
     `${MENU_BUTTONS.TERABOX_CONVERT} - save ke akun dan buat share link baru`,
@@ -1328,6 +1985,7 @@ function menuText() {
 function menuKeyboard() {
   return {
     keyboard: [
+      [{ text: MENU_BUTTONS.BUAT_POST }],
       [{ text: MENU_BUTTONS.SHORTEN }, { text: MENU_BUTTONS.TERABOX_PRO }],
       [{ text: MENU_BUTTONS.TERABOX_CONVERT }, { text: MENU_BUTTONS.TERABOX_DASHBOARD }],
       [{ text: MENU_BUTTONS.HELP }]
@@ -1336,6 +1994,105 @@ function menuKeyboard() {
     one_time_keyboard: false,
     input_field_placeholder: 'Pilih menu atau kirim link'
   };
+}
+
+function postBuilderKeyboard(step, draft = null) {
+  if (step === 'preview_link') {
+    return {
+      keyboard: [
+        [{ text: MENU_BUTTONS.POST_SKIP_PREVIEW }, { text: MENU_BUTTONS.POST_CANCEL }]
+      ],
+      resize_keyboard: true,
+      one_time_keyboard: false,
+      input_field_placeholder: 'Kirim link preview'
+    };
+  }
+
+  if (step === 'shop_link') {
+    const rows = getPostLinkItems('shop').map((item) => [{ text: postLinkButtonText(item, 'shop') }]);
+    rows.push([{ text: MENU_BUTTONS.POST_SKIP_SHOP }, { text: MENU_BUTTONS.POST_CANCEL }]);
+    return {
+      keyboard: rows,
+      resize_keyboard: true,
+      one_time_keyboard: false,
+      input_field_placeholder: 'Pilih shop'
+    };
+  }
+
+  if (step === 'microsite_link') {
+    const rows = getPostLinkItems('microsite').map((item) => [{ text: postLinkButtonText(item, 'microsite') }]);
+    rows.push([{ text: MENU_BUTTONS.POST_SKIP_MICROSITE }, { text: MENU_BUTTONS.POST_CANCEL }]);
+    return {
+      keyboard: rows,
+      resize_keyboard: true,
+      one_time_keyboard: false,
+      input_field_placeholder: 'Pilih microsite'
+    };
+  }
+
+  if (step === 'review') {
+    return {
+      keyboard: [
+        [{ text: MENU_BUTTONS.POST_SEND }],
+        [{ text: MENU_BUTTONS.POST_EDIT }, { text: MENU_BUTTONS.POST_CANCEL }]
+      ],
+      resize_keyboard: true,
+      one_time_keyboard: false,
+      input_field_placeholder: 'Cek preview lalu pilih aksi'
+    };
+  }
+
+  if (step === 'edit_select') {
+    return {
+      keyboard: [
+        [{ text: MENU_BUTTONS.POST_EDIT_DESCRIPTION }, { text: MENU_BUTTONS.POST_EDIT_PREVIEW }],
+        [{ text: MENU_BUTTONS.POST_EDIT_CONTENT }],
+        [{ text: MENU_BUTTONS.POST_EDIT_SHOP }, { text: MENU_BUTTONS.POST_EDIT_MICROSITE }],
+        [{ text: MENU_BUTTONS.POST_BACK_REVIEW }, { text: MENU_BUTTONS.POST_CANCEL }]
+      ],
+      resize_keyboard: true,
+      one_time_keyboard: false,
+      input_field_placeholder: 'Pilih bagian edit'
+    };
+  }
+
+  return {
+    keyboard: draft && draft.editing ? [
+      [{ text: MENU_BUTTONS.POST_BACK_REVIEW }, { text: MENU_BUTTONS.POST_CANCEL }]
+    ] : [
+      [{ text: MENU_BUTTONS.POST_CANCEL }]
+    ],
+    resize_keyboard: true,
+    one_time_keyboard: false,
+    input_field_placeholder: step === 'content_link' ? 'Kirim link konten' : 'Kirim deskripsi'
+  };
+}
+
+function postChannelSelectKeyboard() {
+  const rows = getPostChannels().map((channel) => [{ text: channelButtonText(channel) }]);
+  rows.push([{ text: MENU_BUTTONS.POST_CANCEL }]);
+
+  return {
+    keyboard: rows,
+    resize_keyboard: true,
+    one_time_keyboard: false,
+    input_field_placeholder: 'Pilih channel tujuan'
+  };
+}
+
+function postFromResultsKeyboard(results) {
+  const buttons = results
+    .filter((result) => result && result.newShareUrl)
+    .slice(0, 5)
+    .map((result, index, list) => {
+      const token = savePostActionLink(result.newShareUrl);
+      return [{
+        text: list.length === 1 ? 'Langsung Post' : `Post Link ${index + 1}`,
+        callback_data: `post_from_link:${token}`
+      }];
+    });
+
+  return buttons.length > 0 ? { inline_keyboard: buttons } : undefined;
 }
 
 function teraboxDashboardText(session) {
@@ -1476,6 +2233,295 @@ function isAllowedTarget(userId, chatId) {
   return (userId && config.allowedUserIds.has(String(userId))) || config.allowedChatIds.has(chatId);
 }
 
+function getPostDraftKey(message) {
+  const userId = message.from && message.from.id;
+  return userId ? `user:${userId}` : `chat:${message.chat.id}`;
+}
+
+function isPostCancelText(text) {
+  const normalized = text.trim().toLowerCase();
+  return normalized === MENU_BUTTONS.POST_CANCEL.toLowerCase() || normalized === '/batal' || normalized === '/cancel';
+}
+
+function isPostBackReviewText(text) {
+  return text.trim().toLowerCase() === MENU_BUTTONS.POST_BACK_REVIEW.toLowerCase();
+}
+
+function setDraftEditStep(draft, step, field) {
+  return {
+    ...draft,
+    step,
+    editing: field,
+    updatedAt: new Date().toISOString()
+  };
+}
+
+function clearDraftEdit(draft) {
+  const next = {
+    ...draft,
+    updatedAt: new Date().toISOString()
+  };
+  delete next.editing;
+  return next;
+}
+
+function savePostActionLink(link) {
+  cleanupPostActionLinks();
+  const token = crypto.randomBytes(8).toString('hex');
+  postActionLinks.set(token, {
+    link,
+    expiresAt: Date.now() + 60 * 60 * 1000
+  });
+  return token;
+}
+
+function takePostActionLink(token) {
+  cleanupPostActionLinks();
+  const entry = postActionLinks.get(token);
+  if (!entry) {
+    return '';
+  }
+
+  postActionLinks.delete(token);
+  return entry.link;
+}
+
+function cleanupPostActionLinks() {
+  const now = Date.now();
+  for (const [token, entry] of postActionLinks.entries()) {
+    if (!entry || entry.expiresAt <= now) {
+      postActionLinks.delete(token);
+    }
+  }
+}
+
+function parseAddChannelBody(body) {
+  const clean = String(body || '').trim();
+  const match = clean.match(/^(@[a-z0-9_]{5,}|-?\d{5,})(?:\s+(.+))?$/i);
+  if (!match) {
+    return null;
+  }
+
+  const id = match[1].trim();
+  const name = normalizeChannelName(match[2] || id);
+  return { id, name };
+}
+
+async function validateBotChannelAdmin(channelId) {
+  let chat;
+  try {
+    chat = await telegram('getChat', {
+      chat_id: channelId
+    });
+  } catch (error) {
+    throw new Error(`Bot tidak bisa membaca channel ${channelId}: ${error.message}`);
+  }
+
+  if (chat.type !== 'channel') {
+    throw new Error(`Target ${channelId} bukan channel Telegram.`);
+  }
+
+  const bot = await getBotInfo();
+  let member;
+  try {
+    member = await telegram('getChatMember', {
+      chat_id: channelId,
+      user_id: bot.id
+    });
+  } catch (error) {
+    throw new Error(`Bot belum terdaftar di channel ${chat.title || channelId}: ${error.message}`);
+  }
+
+  const status = String(member.status || '').toLowerCase();
+  if (status !== 'administrator' && status !== 'creator') {
+    throw new Error(`Bot sudah ada di ${chat.title || channelId}, tapi statusnya ${status || 'unknown'}, bukan admin.`);
+  }
+
+  if (member.status === 'administrator' && member.can_post_messages === false) {
+    throw new Error(`Bot admin di ${chat.title || channelId}, tapi belum punya izin post messages.`);
+  }
+
+  return {
+    id: chat.id,
+    title: chat.title || '',
+    username: chat.username || '',
+    status: member.status
+  };
+}
+
+function parseAddLinkBody(body) {
+  const clean = String(body || '').trim();
+  const match = clean.match(/^(https?:\/\/[^\s<>"'`]+|www\.[^\s<>"'`]+)(?:\s+(.+))?$/i);
+  if (!match) {
+    return null;
+  }
+
+  const url = normalizeUrl(stripTrailingPunctuation(match[1]));
+  if (!url) {
+    return null;
+  }
+
+  return {
+    url,
+    name: normalizeLinkName(match[2] || safeHost(url) || url)
+  };
+}
+
+function upsertPostChannel(id, name) {
+  const cleanId = String(id || '').trim();
+  const channel = {
+    id: cleanId,
+    name: normalizeChannelName(name || cleanId),
+    updatedAt: new Date().toISOString()
+  };
+
+  const existingIndex = postChannels.findIndex((item) => item.id === cleanId);
+  if (existingIndex === -1) {
+    channel.createdAt = channel.updatedAt;
+    postChannels.push(channel);
+  } else {
+    channel.createdAt = postChannels[existingIndex].createdAt || channel.updatedAt;
+    postChannels[existingIndex] = channel;
+  }
+
+  saveChannelStore();
+  return channel;
+}
+
+function removePostChannel(query) {
+  const clean = String(query || '').trim();
+  const indexNumber = Number.parseInt(clean, 10);
+  let index = Number.isSafeInteger(indexNumber) && String(indexNumber) === clean ? indexNumber - 1 : -1;
+
+  if (index < 0 || index >= postChannels.length) {
+    const normalized = clean.toLowerCase();
+    index = postChannels.findIndex((channel) => {
+      return channel.id.toLowerCase() === normalized || channel.name.toLowerCase() === normalized;
+    });
+  }
+
+  if (index < 0 || index >= postChannels.length) {
+    return null;
+  }
+
+  const [removed] = postChannels.splice(index, 1);
+  saveChannelStore();
+  return removed;
+}
+
+function getPostChannels() {
+  return postChannels.slice();
+}
+
+function resolveSinglePostChannel() {
+  const channels = getPostChannels();
+  return channels[0] || null;
+}
+
+function findPostChannelByButtonText(text) {
+  const normalized = String(text || '').trim();
+  return getPostChannels().find((channel) => channelButtonText(channel) === normalized) || null;
+}
+
+function channelButtonText(channel) {
+  return `Channel: ${channel.name}`;
+}
+
+function formatPostChannel(channel) {
+  return `${channel.name} (${channel.id})`;
+}
+
+function normalizeChannelName(value) {
+  return String(value || '').replace(/\s+/g, ' ').trim().slice(0, 80) || 'Channel';
+}
+
+function upsertPostLinkItem(type, url, name) {
+  const items = getPostLinkStore(type);
+  const cleanUrl = String(url || '').trim();
+  const item = {
+    url: cleanUrl,
+    name: normalizeLinkName(name || cleanUrl),
+    updatedAt: new Date().toISOString()
+  };
+
+  const existingIndex = items.findIndex((entry) => entry.url === cleanUrl);
+  if (existingIndex === -1) {
+    item.createdAt = item.updatedAt;
+    items.push(item);
+  } else {
+    item.createdAt = items[existingIndex].createdAt || item.updatedAt;
+    items[existingIndex] = item;
+  }
+
+  savePostLinkStore(type);
+  return item;
+}
+
+function removePostLinkItem(type, query) {
+  const items = getPostLinkStore(type);
+  const clean = String(query || '').trim();
+  const indexNumber = Number.parseInt(clean, 10);
+  let index = Number.isSafeInteger(indexNumber) && String(indexNumber) === clean ? indexNumber - 1 : -1;
+
+  if (index < 0 || index >= items.length) {
+    const normalized = clean.toLowerCase();
+    index = items.findIndex((item) => item.url.toLowerCase() === normalized || item.name.toLowerCase() === normalized);
+  }
+
+  if (index < 0 || index >= items.length) {
+    return null;
+  }
+
+  const [removed] = items.splice(index, 1);
+  savePostLinkStore(type);
+  return removed;
+}
+
+function getPostLinkItems(type) {
+  return getPostLinkStore(type).slice();
+}
+
+function getPostLinkStore(type) {
+  return type === 'microsite' ? postMicrosites : postShops;
+}
+
+function findPostLinkItemByButtonText(text, type) {
+  const normalized = String(text || '').trim();
+  return getPostLinkItems(type).find((item) => postLinkButtonText(item, type) === normalized) || null;
+}
+
+function postLinkButtonText(item, type) {
+  return `${postLinkTitle(type)}: ${item.name}`;
+}
+
+function formatPostLinkItem(item) {
+  return `${item.name} (${item.url})`;
+}
+
+function normalizeLinkName(value) {
+  return String(value || '').replace(/\s+/g, ' ').trim().slice(0, 80) || 'Link';
+}
+
+function postLinkLabel(type) {
+  return type === 'microsite' ? 'microsite' : 'shop';
+}
+
+function postLinkTitle(type) {
+  return type === 'microsite' ? 'Microsite' : 'Shop';
+}
+
+function postLinkAddCommand(type) {
+  return type === 'microsite' ? '/addmicrosite' : '/addshop';
+}
+
+function postLinkListCommand(type) {
+  return type === 'microsite' ? '/listmicrosite' : '/listshop';
+}
+
+function postLinkDeleteCommand(type) {
+  return type === 'microsite' ? '/deletemicrosite' : '/deleteshop';
+}
+
 function parseIdSet(value) {
   return new Set(value.split(',').map((item) => item.trim()).filter(Boolean));
 }
@@ -1579,11 +2625,71 @@ function loadSessionStore(filePath) {
   }
 }
 
+function loadChannelStore(filePath) {
+  if (!fs.existsSync(filePath)) {
+    return [];
+  }
+
+  try {
+    const parsed = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+    const records = Array.isArray(parsed) ? parsed : parsed && Array.isArray(parsed.channels) ? parsed.channels : [];
+    return records
+      .map((item) => ({
+        id: String(item && item.id || '').trim(),
+        name: normalizeChannelName(item && item.name || item && item.id || ''),
+        createdAt: String(item && item.createdAt || ''),
+        updatedAt: String(item && item.updatedAt || '')
+      }))
+      .filter((item) => item.id);
+  } catch (error) {
+    console.warn(`[channel-store] Gagal baca ${filePath}: ${error.message}`);
+    return [];
+  }
+}
+
+function loadLinkStore(filePath, key) {
+  if (!fs.existsSync(filePath)) {
+    return [];
+  }
+
+  try {
+    const parsed = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+    const records = Array.isArray(parsed) ? parsed : parsed && Array.isArray(parsed[key]) ? parsed[key] : [];
+    return records
+      .map((item) => ({
+        url: String(item && item.url || '').trim(),
+        name: normalizeLinkName(item && item.name || item && item.url || ''),
+        createdAt: String(item && item.createdAt || ''),
+        updatedAt: String(item && item.updatedAt || '')
+      }))
+      .filter((item) => isHttpUrl(item.url));
+  } catch (error) {
+    console.warn(`[${key}-store] Gagal baca ${filePath}: ${error.message}`);
+    return [];
+  }
+}
+
 function saveSessionStore() {
   fs.mkdirSync(path.dirname(config.sessionStorePath), { recursive: true });
   const tempPath = `${config.sessionStorePath}.tmp`;
   fs.writeFileSync(tempPath, JSON.stringify(teraboxSessions, null, 2));
   fs.renameSync(tempPath, config.sessionStorePath);
+}
+
+function saveChannelStore() {
+  fs.mkdirSync(path.dirname(config.postChannelStorePath), { recursive: true });
+  const tempPath = `${config.postChannelStorePath}.tmp`;
+  fs.writeFileSync(tempPath, JSON.stringify({ channels: postChannels }, null, 2));
+  fs.renameSync(tempPath, config.postChannelStorePath);
+}
+
+function savePostLinkStore(type) {
+  const filePath = type === 'microsite' ? config.postMicrositeStorePath : config.postShopStorePath;
+  const key = type === 'microsite' ? 'microsites' : 'shops';
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+  const tempPath = `${filePath}.tmp`;
+  fs.writeFileSync(tempPath, JSON.stringify({ [key]: getPostLinkStore(type) }, null, 2));
+  fs.renameSync(tempPath, filePath);
 }
 
 function getMessageUserSession(message) {
