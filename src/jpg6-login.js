@@ -88,6 +88,30 @@ async function gotoJpg6Login(page, loginUrl, timeoutMs) {
         return;
       }
 
+      if (loginResponse && loginResponse.status() === 200 && /^https:\/\/(?:www\.)?jpg6\.su\//i.test(responseUrl)) {
+        const rendered = await renderResponseHtml(page, loginResponse, responseUrl).catch((error) => ({
+          ok: false,
+          error: error.message,
+          state: null
+        }));
+        if (rendered.ok && isUsableJpg6Page(page.url(), responseUrl, rendered.state)) {
+          return;
+        }
+
+        lastError = new Error([
+          'Puppeteer menerima HTML JPG6 tapi gagal render otomatis',
+          `home=${homeResponse ? homeResponse.status() : 'no-response'}`,
+          `login=${loginResponse.status()}`,
+          `url=${currentUrl || 'empty'}`,
+          `responseUrl=${responseUrl || 'empty'}`,
+          `location=${rendered.state && rendered.state.location || pageState.location || 'empty'}`,
+          `title=${rendered.state && rendered.state.title || pageState.title || 'empty'}`,
+          `body=${rendered.state && rendered.state.bodyLength || pageState.bodyLength}`,
+          `fallback=${rendered.ok ? 'rendered' : rendered.error || 'failed'}`
+        ].join(', '));
+        continue;
+      }
+
       lastError = new Error([
         'Puppeteer masih berada di about:blank setelah membuka JPG6',
         `home=${homeResponse ? homeResponse.status() : 'no-response'}`,
@@ -105,6 +129,38 @@ async function gotoJpg6Login(page, loginUrl, timeoutMs) {
 
   const failedText = failedRequests.length > 0 ? ` Failed requests: ${failedRequests.join(' | ')}` : '';
   throw new Error(`Gagal membuka halaman login JPG6 (${loginUrl}): ${lastError ? lastError.message : 'unknown error'}.${failedText}`);
+}
+
+async function renderResponseHtml(page, response, responseUrl) {
+  const html = await response.text();
+  if (!html || html.length < 100) {
+    return {
+      ok: false,
+      error: `HTML kosong atau terlalu pendek (${html ? html.length : 0})`,
+      state: null
+    };
+  }
+
+  const htmlWithBase = injectBaseHref(html, responseUrl);
+  await page.setContent(htmlWithBase, {
+    waitUntil: 'domcontentloaded',
+    timeout: 30000
+  });
+  await sleep(2500);
+  const state = await getPageNavigationState(page);
+  return {
+    ok: true,
+    state
+  };
+}
+
+function injectBaseHref(html, responseUrl) {
+  const base = `<base href="${responseUrl.replace(/"/g, '&quot;')}">`;
+  if (/<head[^>]*>/i.test(html)) {
+    return html.replace(/<head([^>]*)>/i, `<head$1>${base}`);
+  }
+
+  return `${base}${html}`;
 }
 
 function isUsableJpg6Page(currentUrl, responseUrl, pageState) {
