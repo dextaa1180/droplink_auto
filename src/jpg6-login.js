@@ -31,6 +31,15 @@ async function loginJpg6Manually(options = {}) {
     });
     await gotoJpg6Login(page, loginUrl, options.navigationTimeoutMs || 45000);
 
+    if (options.username && options.password) {
+      await submitJpg6Credentials(page, {
+        username: options.username,
+        password: options.password,
+        loginUrl,
+        timeoutMs: options.submitTimeoutMs || 60000
+      });
+    }
+
     if (typeof options.onReady === 'function') {
       await options.onReady({
         pageUrl: page.url(),
@@ -186,6 +195,89 @@ function injectBaseHref(html, responseUrl) {
   }
 
   return `${base}${html}`;
+}
+
+async function submitJpg6Credentials(page, options) {
+  const usernameSelector = 'input[name="login-subject"], input[type="email"], input[type="text"]';
+  const passwordSelector = 'input[name="password"], input[type="password"]';
+
+  await page.waitForSelector(usernameSelector, {
+    visible: true,
+    timeout: 30000
+  });
+  await page.waitForSelector(passwordSelector, {
+    visible: true,
+    timeout: 30000
+  });
+
+  await clearAndType(page, usernameSelector, options.username);
+  await clearAndType(page, passwordSelector, options.password);
+
+  await page.click('button[type="submit"], .icon--input-submit').catch(() => null);
+
+  let loggedIn = await waitForLoginOrCaptcha(page, 12000);
+  if (loggedIn) {
+    return;
+  }
+
+  await submitNativeLoginForm(page, options.loginUrl);
+  loggedIn = await waitForLoginOrCaptcha(page, options.timeoutMs || 60000);
+  if (!loggedIn) {
+    const state = await getPageNavigationState(page).catch(() => ({ title: '', bodyLength: 0, location: '' }));
+    throw new Error(`Auto login JPG6 belum berhasil. Cek username/password atau reCAPTCHA. title=${state.title || 'empty'}, location=${state.location || 'empty'}, body=${state.bodyLength}`);
+  }
+}
+
+async function clearAndType(page, selector, value) {
+  await page.focus(selector);
+  await page.keyboard.down('Control');
+  await page.keyboard.press('A');
+  await page.keyboard.up('Control');
+  await page.keyboard.press('Backspace');
+  await page.type(selector, String(value), { delay: 25 });
+}
+
+async function submitNativeLoginForm(page, loginUrl) {
+  await page.evaluate((url) => {
+    const form = document.querySelector('form[data-action="validate"], form');
+    const username = document.querySelector('input[name="login-subject"], input[type="email"], input[type="text"]');
+    const password = document.querySelector('input[name="password"], input[type="password"]');
+    if (!form || !username || !password) {
+      throw new Error('Form login JPG6 tidak lengkap.');
+    }
+
+    if (!form.getAttribute('action')) {
+      form.setAttribute('action', url);
+    }
+
+    form.setAttribute('method', 'post');
+    form.submit();
+  }, loginUrl);
+  await sleep(5000);
+}
+
+async function waitForLoginOrCaptcha(page, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+
+  while (Date.now() < deadline) {
+    const state = await getJpg6LoginState(page);
+    if (state.loggedIn) {
+      return true;
+    }
+
+    const blocked = await page.evaluate(() => {
+      const text = document.body ? document.body.innerText || '' : '';
+      const hasCaptcha = Boolean(document.querySelector('[class*="captcha"], [id*="captcha"], .g-recaptcha, iframe[src*="recaptcha"]'));
+      return hasCaptcha || /captcha|recaptcha/i.test(text);
+    }).catch(() => false);
+    if (blocked) {
+      throw new Error('JPG6 meminta CAPTCHA/reCAPTCHA saat login. Auto login tidak bisa lanjut tanpa verifikasi manual.');
+    }
+
+    await sleep(2000);
+  }
+
+  return false;
 }
 
 function isUsableJpg6Page(currentUrl, responseUrl, pageState) {

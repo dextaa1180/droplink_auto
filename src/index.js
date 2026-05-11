@@ -1350,9 +1350,11 @@ async function startJpg6Session(message) {
   activeJpg6Logins.set(loginKey, true);
   await reply(message.chat.id, message.message_id, [
     'Saya buka browser Puppeteer untuk login JPG6.',
-    'Selesaikan login manual di halaman JPG6. Setelah berhasil, bot akan menyimpan cookies/session.',
+    config.jpg6Username && config.jpg6Password
+      ? 'Saya akan mencoba auto login memakai JPG6_USERNAME/JPG6_PASSWORD dari .env.'
+      : 'Selesaikan login manual di halaman JPG6. Setelah berhasil, bot akan menyimpan cookies/session.',
     '',
-    'Catatan: kalau di VPS tidak ada desktop/display, jalankan dengan Xvfb/VNC atau lakukan login dari mesin yang punya GUI.'
+    'Catatan: kalau JPG6 meminta CAPTCHA/reCAPTCHA, auto login tidak bisa lanjut tanpa verifikasi manual.'
   ].join('\n'), {
     reply_markup: jpg6Keyboard()
   });
@@ -1369,12 +1371,14 @@ async function runJpg6Login(message, loginKey) {
       headless: config.jpg6LoginHeadless,
       executablePath: config.teraboxLoginExecutablePath,
       loginTimeoutMs: config.jpg6LoginTimeoutMs,
+      username: config.jpg6Username,
+      password: config.jpg6Password,
       onReady: async (payload) => {
         if (payload.screenshot) {
           await sendPhotoBuffer(message.chat.id, payload.screenshot, [
             'Login JPG6',
             '',
-            'Browser sudah membuka halaman login JPG6.',
+            config.jpg6Username && config.jpg6Password ? 'Bot sudah mencoba auto login JPG6.' : 'Browser sudah membuka halaman login JPG6.',
             `URL: ${payload.pageUrl}`,
             '',
             'Selesaikan login manual sampai akun masuk.'
@@ -1675,6 +1679,8 @@ function readConfig() {
     jpg6LoginUrl: optionalUrl(process.env.JPG6_LOGIN_URL || DEFAULT_JPG6_LOGIN_URL, 'JPG6_LOGIN_URL'),
     jpg6LoginTimeoutMs: parsePositiveInt(process.env.JPG6_LOGIN_TIMEOUT_MS, 300000),
     jpg6LoginHeadless: parseBool(process.env.JPG6_LOGIN_HEADLESS, false),
+    jpg6Username: (process.env.JPG6_USERNAME || '').trim(),
+    jpg6Password: process.env.JPG6_PASSWORD || '',
     jpg6SessionStorePath: resolveWorkspacePath(process.env.JPG6_SESSION_STORE_FILE || path.join(process.env.DATA_DIR || 'data', 'jpg6-session.json')),
     teraboxConvertDestinationRoot: normalizeRemoteConfigDir(process.env.TERABOX_CONVERT_DESTINATION_ROOT || '/Tuna Bot'),
     teraboxConvertSharePassword: cleanTeraboxSharePassword(process.env.TERABOX_CONVERT_SHARE_PASSWORD || ''),
