@@ -3,6 +3,7 @@
 const crypto = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
+const { DEFAULT_JPG6_LOGIN_URL, loginJpg6Manually, verifyJpg6Session } = require('./jpg6-login');
 const { buildPostText, createPostDraft, setDraftField, setDraftStep } = require('./post-builder');
 const { convertTeraboxShare } = require('./terabox-converter');
 const { DEFAULT_LOGIN_URL, loginWithQrCode } = require('./terabox-login');
@@ -14,10 +15,12 @@ const telegramBaseUrl = `https://api.telegram.org/bot${config.telegramBotToken}`
 const droplinkHost = safeHost(config.droplinkBaseUrl);
 const chatModes = new Map();
 const teraboxSessions = loadSessionStore(config.sessionStorePath);
+let jpg6Session = loadJpg6Session(config.jpg6SessionStorePath);
 const postChannels = loadChannelStore(config.postChannelStorePath);
 const postShops = loadLinkStore(config.postShopStorePath, 'shops');
 const postMicrosites = loadLinkStore(config.postMicrositeStorePath, 'microsites');
 const activeTeraboxLogins = new Map();
+const activeJpg6Logins = new Map();
 const postDrafts = new Map();
 const postActionLinks = new Map();
 
@@ -34,6 +37,9 @@ const MENU_BUTTONS = {
   TERABOX_PRO: 'TeraBox Pro',
   TERABOX_CONVERT: 'Convert TeraBox',
   TERABOX_DASHBOARD: 'Dashboard TeraBox',
+  JPG6_LOGIN: 'Login JPG6',
+  JPG6_STATUS: 'Status JPG6',
+  JPG6_LOGOUT: 'Logout JPG6',
   TERABOX_LOGIN: 'Login TeraBox',
   TERABOX_CONNECT: 'Hubungkan TeraBox',
   TERABOX_STATUS: 'Status Session',
@@ -328,6 +334,21 @@ async function handleCommand(message, command) {
     return;
   }
 
+  if (command.name === 'jpg6_login' || command.name === 'login_jpg6') {
+    await startJpg6Session(message);
+    return;
+  }
+
+  if (command.name === 'jpg6_status' || command.name === 'status_jpg6') {
+    await showJpg6SessionStatus(message);
+    return;
+  }
+
+  if (command.name === 'jpg6_logout' || command.name === 'logout_jpg6') {
+    await disconnectJpg6Session(message);
+    return;
+  }
+
   await reply(chatId, message.message_id, 'Command tidak dikenal. Pakai /help untuk melihat contoh penggunaan.');
 }
 
@@ -379,6 +400,21 @@ async function handleMenuAction(message, action) {
 
   if (action === 'terabox_disconnect') {
     await disconnectTeraboxSession(message);
+    return;
+  }
+
+  if (action === 'jpg6_login') {
+    await startJpg6Session(message);
+    return;
+  }
+
+  if (action === 'jpg6_status') {
+    await showJpg6SessionStatus(message);
+    return;
+  }
+
+  if (action === 'jpg6_logout') {
+    await disconnectJpg6Session(message);
     return;
   }
 
@@ -1298,6 +1334,129 @@ async function disconnectTeraboxSession(message) {
   });
 }
 
+async function startJpg6Session(message) {
+  if (!(await ensurePrivateOwnerAccess(message, 'JPG6'))) {
+    return;
+  }
+
+  const loginKey = String(message.from.id);
+  if (activeJpg6Logins.has(loginKey)) {
+    await reply(message.chat.id, message.message_id, 'Login JPG6 sedang berjalan. Selesaikan login manual di browser yang sudah dibuka.', {
+      reply_markup: jpg6Keyboard()
+    });
+    return;
+  }
+
+  activeJpg6Logins.set(loginKey, true);
+  await reply(message.chat.id, message.message_id, [
+    'Saya buka browser Puppeteer untuk login JPG6.',
+    'Selesaikan login manual di halaman JPG6. Setelah berhasil, bot akan menyimpan cookies/session.',
+    '',
+    'Catatan: kalau di VPS tidak ada desktop/display, jalankan dengan Xvfb/VNC atau lakukan login dari mesin yang punya GUI.'
+  ].join('\n'), {
+    reply_markup: jpg6Keyboard()
+  });
+
+  runJpg6Login(message, loginKey).catch((error) => {
+    console.error('[jpg6-login]', error);
+  });
+}
+
+async function runJpg6Login(message, loginKey) {
+  try {
+    const result = await loginJpg6Manually({
+      loginUrl: config.jpg6LoginUrl,
+      headless: config.jpg6LoginHeadless,
+      executablePath: config.teraboxLoginExecutablePath,
+      loginTimeoutMs: config.jpg6LoginTimeoutMs,
+      onReady: async (payload) => {
+        if (payload.screenshot) {
+          await sendPhotoBuffer(message.chat.id, payload.screenshot, [
+            'Login JPG6',
+            '',
+            'Browser sudah membuka halaman login JPG6.',
+            `URL: ${payload.pageUrl}`,
+            '',
+            'Selesaikan login manual sampai akun masuk.'
+          ].join('\n'), {
+            reply_to_message_id: message.message_id,
+            reply_markup: jpg6Keyboard()
+          });
+          return;
+        }
+
+        await sendMessage(message.chat.id, `Browser sudah membuka halaman login JPG6:\n${payload.pageUrl}`, {
+          reply_markup: jpg6Keyboard()
+        });
+      }
+    });
+
+    jpg6Session = saveJpg6SessionFromLogin(result);
+    await sendMessage(message.chat.id, formatJpg6SessionStatus(jpg6Session, 'Login JPG6 berhasil. Cookies/session sudah tersimpan.'), {
+      reply_markup: jpg6Keyboard()
+    });
+  } catch (error) {
+    await sendMessage(message.chat.id, `Gagal login JPG6: ${error.message}`, {
+      reply_markup: jpg6Keyboard()
+    });
+  } finally {
+    activeJpg6Logins.delete(loginKey);
+  }
+}
+
+async function showJpg6SessionStatus(message) {
+  if (!(await ensurePrivateOwnerAccess(message, 'JPG6'))) {
+    return;
+  }
+
+  if (!jpg6Session || !Array.isArray(jpg6Session.cookies) || jpg6Session.cookies.length === 0) {
+    await reply(message.chat.id, message.message_id, 'Belum ada session JPG6. Jalankan /jpg6_login dulu.', {
+      reply_markup: jpg6Keyboard()
+    });
+    return;
+  }
+
+  await telegram('sendChatAction', {
+    chat_id: message.chat.id,
+    action: 'typing'
+  });
+
+  try {
+    const status = await verifyJpg6Session(jpg6Session, {
+      headless: true,
+      executablePath: config.teraboxLoginExecutablePath
+    });
+    const session = {
+      ...jpg6Session,
+      status: status.connected ? 'connected' : 'expired',
+      accountName: status.accountName || jpg6Session.accountName || '',
+      pageUrl: status.pageUrl || jpg6Session.pageUrl || '',
+      updatedAt: new Date().toISOString()
+    };
+    jpg6Session = session;
+    saveJpg6SessionStore();
+    await reply(message.chat.id, message.message_id, formatJpg6SessionStatus(session), {
+      reply_markup: jpg6Keyboard()
+    });
+  } catch (error) {
+    await reply(message.chat.id, message.message_id, `Gagal cek session JPG6: ${error.message}`, {
+      reply_markup: jpg6Keyboard()
+    });
+  }
+}
+
+async function disconnectJpg6Session(message) {
+  if (!(await ensurePrivateOwnerAccess(message, 'JPG6'))) {
+    return;
+  }
+
+  jpg6Session = null;
+  saveJpg6SessionStore();
+  await reply(message.chat.id, message.message_id, 'Session JPG6 lokal sudah dihapus.', {
+    reply_markup: jpg6Keyboard()
+  });
+}
+
 async function shortenWithDroplink(longUrl, alias) {
   const endpoint = new URL('/api', ensureTrailingSlash(config.droplinkBaseUrl));
   endpoint.searchParams.set('api', config.droplinkApiKey);
@@ -1513,6 +1672,10 @@ function readConfig() {
     teraboxLoginTimeoutMs: parsePositiveInt(process.env.TERABOX_LOGIN_TIMEOUT_MS, 180000),
     teraboxLoginHeadless: parseBool(process.env.TERABOX_LOGIN_HEADLESS, true),
     teraboxLoginExecutablePath: (process.env.PUPPETEER_EXECUTABLE_PATH || '').trim(),
+    jpg6LoginUrl: optionalUrl(process.env.JPG6_LOGIN_URL || DEFAULT_JPG6_LOGIN_URL, 'JPG6_LOGIN_URL'),
+    jpg6LoginTimeoutMs: parsePositiveInt(process.env.JPG6_LOGIN_TIMEOUT_MS, 300000),
+    jpg6LoginHeadless: parseBool(process.env.JPG6_LOGIN_HEADLESS, false),
+    jpg6SessionStorePath: resolveWorkspacePath(process.env.JPG6_SESSION_STORE_FILE || path.join(process.env.DATA_DIR || 'data', 'jpg6-session.json')),
     teraboxConvertDestinationRoot: normalizeRemoteConfigDir(process.env.TERABOX_CONVERT_DESTINATION_ROOT || '/Tuna Bot'),
     teraboxConvertSharePassword: cleanTeraboxSharePassword(process.env.TERABOX_CONVERT_SHARE_PASSWORD || ''),
     teraboxConvertSharePeriod: parseNonNegativeInt(process.env.TERABOX_CONVERT_SHARE_PERIOD, 0),
@@ -1638,6 +1801,18 @@ function parseMenuButton(text) {
 
   if (normalized === MENU_BUTTONS.TERABOX_DISCONNECT.toLowerCase()) {
     return 'terabox_disconnect';
+  }
+
+  if (normalized === MENU_BUTTONS.JPG6_LOGIN.toLowerCase()) {
+    return 'jpg6_login';
+  }
+
+  if (normalized === MENU_BUTTONS.JPG6_STATUS.toLowerCase()) {
+    return 'jpg6_status';
+  }
+
+  if (normalized === MENU_BUTTONS.JPG6_LOGOUT.toLowerCase()) {
+    return 'jpg6_logout';
   }
 
   if (normalized === MENU_BUTTONS.HELP.toLowerCase()) {
@@ -2007,6 +2182,9 @@ function helpText() {
     '/listmicrosite',
     '/renamemicrosite 1 Nama Baru',
     '/deletemicrosite 1',
+    '/jpg6_login',
+    '/jpg6_status',
+    '/jpg6_logout',
     '/terabox_pro https://1024terabox.com/s/xxxxx',
     '/terabox https://1024terabox.com/s/xxxxx',
     '/convert_terabox https://1024terabox.com/s/xxxxx',
@@ -2175,6 +2353,19 @@ function teraboxDashboardKeyboard() {
   };
 }
 
+function jpg6Keyboard() {
+  return {
+    keyboard: [
+      [{ text: MENU_BUTTONS.JPG6_LOGIN }, { text: MENU_BUTTONS.JPG6_STATUS }],
+      [{ text: MENU_BUTTONS.JPG6_LOGOUT }],
+      [{ text: MENU_BUTTONS.BUAT_POST }, { text: MENU_BUTTONS.HELP }]
+    ],
+    resize_keyboard: true,
+    one_time_keyboard: false,
+    input_field_placeholder: 'Kelola session JPG6'
+  };
+}
+
 function formatTeraboxSessionStart(payload, session) {
   const loginUrl = getPayloadString(payload, ['loginUrl', 'login_url', 'authorizeUrl', 'authorize_url']);
   const expiresAt = getPayloadString(payload, ['expiresAt', 'expires_at', 'expireAt', 'expire_at']) || session.expiresAt;
@@ -2239,6 +2430,37 @@ function formatSessionSummary(session) {
   return lines.join('\n');
 }
 
+function formatJpg6SessionStatus(session, note) {
+  const lines = [
+    'Status session JPG6:',
+    '',
+    `Status: ${session && session.status || 'unknown'}`,
+    `Cookies: ${session && Array.isArray(session.cookies) ? session.cookies.length : 0}`
+  ];
+
+  if (session && session.accountName) {
+    lines.push(`Akun: ${session.accountName}`);
+  }
+
+  if (session && session.pageUrl) {
+    lines.push(`URL: ${session.pageUrl}`);
+  }
+
+  if (session && session.connectedAt) {
+    lines.push(`Terhubung: ${session.connectedAt}`);
+  }
+
+  if (session && session.updatedAt) {
+    lines.push(`Update: ${session.updatedAt}`);
+  }
+
+  if (note) {
+    lines.push('', note);
+  }
+
+  return lines.join('\n');
+}
+
 async function ensureTeraboxDashboardAccess(message) {
   const chatId = message.chat.id;
   const userId = message.from && message.from.id;
@@ -2255,6 +2477,28 @@ async function ensureTeraboxDashboardAccess(message) {
 
   if (!isAllowedDashboardUser(userId)) {
     await reply(chatId, message.message_id, 'Dashboard TeraBox dibatasi untuk user yang diizinkan.');
+    return false;
+  }
+
+  return true;
+}
+
+async function ensurePrivateOwnerAccess(message, featureName) {
+  const chatId = message.chat.id;
+  const userId = message.from && message.from.id;
+
+  if (!userId) {
+    await reply(chatId, message.message_id, `${featureName} hanya tersedia untuk akun user, bukan channel.`);
+    return false;
+  }
+
+  if (!isPrivateChat(message)) {
+    await reply(chatId, message.message_id, `${featureName} hanya bisa dibuka di chat private dengan bot.`);
+    return false;
+  }
+
+  if (!isAllowedDashboardUser(userId)) {
+    await reply(chatId, message.message_id, `${featureName} dibatasi untuk user yang diizinkan.`);
     return false;
   }
 
@@ -2740,6 +2984,20 @@ function loadSessionStore(filePath) {
   }
 }
 
+function loadJpg6Session(filePath) {
+  if (!fs.existsSync(filePath)) {
+    return null;
+  }
+
+  try {
+    const parsed = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+    return parsed && typeof parsed === 'object' && Array.isArray(parsed.cookies) ? parsed : null;
+  } catch (error) {
+    console.warn(`[jpg6-session] Gagal baca ${filePath}: ${error.message}`);
+    return null;
+  }
+}
+
 function loadChannelStore(filePath) {
   if (!fs.existsSync(filePath)) {
     return [];
@@ -2789,6 +3047,31 @@ function saveSessionStore() {
   const tempPath = `${config.sessionStorePath}.tmp`;
   fs.writeFileSync(tempPath, JSON.stringify(teraboxSessions, null, 2));
   fs.renameSync(tempPath, config.sessionStorePath);
+}
+
+function saveJpg6SessionStore() {
+  fs.mkdirSync(path.dirname(config.jpg6SessionStorePath), { recursive: true });
+  const tempPath = `${config.jpg6SessionStorePath}.tmp`;
+  fs.writeFileSync(tempPath, JSON.stringify(jpg6Session || {}, null, 2));
+  fs.renameSync(tempPath, config.jpg6SessionStorePath);
+}
+
+function saveJpg6SessionFromLogin(result) {
+  const now = new Date().toISOString();
+  const session = {
+    status: 'connected',
+    authType: 'cookies',
+    loginMethod: 'puppeteer_manual',
+    accountName: result.accountName || '',
+    pageUrl: result.pageUrl || '',
+    cookies: Array.isArray(result.cookies) ? result.cookies : [],
+    connectedAt: now,
+    updatedAt: now
+  };
+
+  jpg6Session = session;
+  saveJpg6SessionStore();
+  return session;
 }
 
 function saveChannelStore() {
