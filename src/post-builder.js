@@ -39,24 +39,29 @@ function buildPostText(draft, options = {}) {
   const lines = [
     `📌 ASUPAN (${date})`,
     '',
-    draft.description || '-',
-    '',
-    '',
-    '',
-    '',
-    'Preview :',
-    `➡️${draft.previewLink || '-'}`,
-    '',
-    'Link :',
-    `➡️ ${draft.contentLink || '-'}`,
-    `❗️${DEFAULT_TIKTOK_NOTE}`
+    draft.description || '-'
   ];
+
+  if (draft.previewLink) {
+    lines.push(
+      '',
+      'Preview:',
+      `➡️ ${draft.previewLink}`
+    );
+  }
+
+  lines.push(
+    '',
+    'Link:',
+    `➡️ ${draft.contentLink || '-'}`,
+    `❗️ ${DEFAULT_TIKTOK_NOTE}`
+  );
 
   if (draft.shopLink) {
     lines.push(
       '',
       'KUNJUNGI ETALASE TUNA 🛍',
-      `➡️${draft.shopLink}`
+      `➡️ ${draft.shopLink}`
     );
   }
 
@@ -64,7 +69,7 @@ function buildPostText(draft, options = {}) {
     lines.push(
       '',
       'KONTEN LAIN ✅',
-      `➡️${draft.micrositeLink}`
+      `➡️ ${draft.micrositeLink}`
     );
   }
 
