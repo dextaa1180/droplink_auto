@@ -223,6 +223,11 @@ async function handleCommand(message, command) {
     return;
   }
 
+  if (command.name === 'renamechannel' || command.name === 'rename_channel' || command.name === 'updatechannel' || command.name === 'update_channel') {
+    await renamePostChannel(message, command.body);
+    return;
+  }
+
   if (command.name === 'addshop' || command.name === 'add_shop') {
     await addPostLinkItem(message, command.body, 'shop');
     return;
@@ -238,6 +243,11 @@ async function handleCommand(message, command) {
     return;
   }
 
+  if (command.name === 'renameshop' || command.name === 'rename_shop' || command.name === 'updateshop' || command.name === 'update_shop') {
+    await renamePostLinkItem(message, command.body, 'shop');
+    return;
+  }
+
   if (command.name === 'addmicrosite' || command.name === 'add_micro' || command.name === 'add_microsite') {
     await addPostLinkItem(message, command.body, 'microsite');
     return;
@@ -250,6 +260,11 @@ async function handleCommand(message, command) {
 
   if (command.name === 'deletemicrosite' || command.name === 'delete_micro' || command.name === 'delete_microsite' || command.name === 'delmicrosite') {
     await deletePostLinkItem(message, command.body, 'microsite');
+    return;
+  }
+
+  if (command.name === 'renamemicrosite' || command.name === 'rename_micro' || command.name === 'rename_microsite' || command.name === 'updatemicrosite' || command.name === 'update_micro' || command.name === 'update_microsite') {
+    await renamePostLinkItem(message, command.body, 'microsite');
     return;
   }
 
@@ -824,6 +839,22 @@ async function deletePostChannel(message, body) {
   await reply(message.chat.id, message.message_id, `Channel dihapus:\n${formatPostChannel(removed)}`);
 }
 
+async function renamePostChannel(message, body) {
+  const parsed = parseRenameBody(body);
+  if (!parsed) {
+    await reply(message.chat.id, message.message_id, 'Format: /renamechannel <nomor|channel_id|@username> Nama Baru');
+    return;
+  }
+
+  const channel = renamePostChannelRecord(parsed.query, parsed.name);
+  if (!channel) {
+    await reply(message.chat.id, message.message_id, 'Channel tidak ditemukan. Cek daftar dengan /listchannel.');
+    return;
+  }
+
+  await reply(message.chat.id, message.message_id, `Channel diperbarui:\n${formatPostChannel(channel)}`);
+}
+
 async function startPostLinkSelection(message, draft, type) {
   const chatId = message.chat.id;
   const items = getPostLinkItems(type);
@@ -890,6 +921,22 @@ async function deletePostLinkItem(message, body, type) {
   await reply(message.chat.id, message.message_id, `${postLinkTitle(type)} dihapus:\n${formatPostLinkItem(removed)}`);
 }
 
+async function renamePostLinkItem(message, body, type) {
+  const parsed = parseRenameBody(body);
+  if (!parsed) {
+    await reply(message.chat.id, message.message_id, `Format: ${postLinkRenameCommand(type)} <nomor|url|nama> Nama Baru`);
+    return;
+  }
+
+  const item = renamePostLinkRecord(type, parsed.query, parsed.name);
+  if (!item) {
+    await reply(message.chat.id, message.message_id, `${postLinkTitle(type)} tidak ditemukan. Cek daftar dengan ${postLinkListCommand(type)}.`);
+    return;
+  }
+
+  await reply(message.chat.id, message.message_id, `${postLinkTitle(type)} diperbarui:\n${formatPostLinkItem(item)}`);
+}
+
 async function shortenAndReply(message, urls, alias) {
   const chatId = message.chat.id;
   const limitedUrls = uniqueUrls(urls).slice(0, config.maxUrlsPerMessage);
@@ -913,7 +960,9 @@ async function shortenAndReply(message, urls, alias) {
     }
   }
 
-  await reply(chatId, message.message_id, formatResults(results));
+  await reply(chatId, message.message_id, formatResults(results), {
+    reply_markup: postFromResultsKeyboard(results)
+  });
 }
 
 async function reshareTeraboxAndReply(message, urls) {
@@ -1948,12 +1997,15 @@ function helpText() {
     '/buatpost',
     '/addchannel -100xxxxxxxxxx Nama Channel',
     '/listchannel',
+    '/renamechannel 1 Nama Baru',
     '/deletechannel 1',
     '/addshop https://shop.example Etalase Tuna',
     '/listshop',
+    '/renameshop 1 Nama Baru',
     '/deleteshop 1',
     '/addmicrosite https://site.example Konten Lain',
     '/listmicrosite',
+    '/renamemicrosite 1 Nama Baru',
     '/deletemicrosite 1',
     '/terabox_pro https://1024terabox.com/s/xxxxx',
     '/terabox https://1024terabox.com/s/xxxxx',
@@ -2082,10 +2134,11 @@ function postChannelSelectKeyboard() {
 
 function postFromResultsKeyboard(results) {
   const buttons = results
-    .filter((result) => result && result.newShareUrl)
+    .map((result) => result && (result.newShareUrl || result.shortUrl))
+    .filter(Boolean)
     .slice(0, 5)
-    .map((result, index, list) => {
-      const token = savePostActionLink(result.newShareUrl);
+    .map((link, index, list) => {
+      const token = savePostActionLink(link);
       return [{
         text: list.length === 1 ? 'Langsung Post' : `Post Link ${index + 1}`,
         callback_data: `post_from_link:${token}`
@@ -2307,6 +2360,22 @@ function parseAddChannelBody(body) {
   return { id, name };
 }
 
+function parseRenameBody(body) {
+  const clean = String(body || '').trim();
+  const firstSpace = clean.search(/\s/);
+  if (firstSpace === -1) {
+    return null;
+  }
+
+  const query = clean.slice(0, firstSpace).trim();
+  const name = clean.slice(firstSpace + 1).replace(/\s+/g, ' ').trim();
+  if (!query || !name) {
+    return null;
+  }
+
+  return { query, name };
+}
+
 async function validateBotChannelAdmin(channelId) {
   let chat;
   try {
@@ -2388,7 +2457,33 @@ function upsertPostChannel(id, name) {
   return channel;
 }
 
+function renamePostChannelRecord(query, name) {
+  const index = findPostChannelIndex(query);
+  if (index === -1) {
+    return null;
+  }
+
+  postChannels[index] = {
+    ...postChannels[index],
+    name: normalizeChannelName(name),
+    updatedAt: new Date().toISOString()
+  };
+  saveChannelStore();
+  return postChannels[index];
+}
+
 function removePostChannel(query) {
+  const index = findPostChannelIndex(query);
+  if (index === -1) {
+    return null;
+  }
+
+  const [removed] = postChannels.splice(index, 1);
+  saveChannelStore();
+  return removed;
+}
+
+function findPostChannelIndex(query) {
   const clean = String(query || '').trim();
   const indexNumber = Number.parseInt(clean, 10);
   let index = Number.isSafeInteger(indexNumber) && String(indexNumber) === clean ? indexNumber - 1 : -1;
@@ -2400,13 +2495,7 @@ function removePostChannel(query) {
     });
   }
 
-  if (index < 0 || index >= postChannels.length) {
-    return null;
-  }
-
-  const [removed] = postChannels.splice(index, 1);
-  saveChannelStore();
-  return removed;
+  return index >= 0 && index < postChannels.length ? index : -1;
 }
 
 function getPostChannels() {
@@ -2457,7 +2546,35 @@ function upsertPostLinkItem(type, url, name) {
   return item;
 }
 
+function renamePostLinkRecord(type, query, name) {
+  const items = getPostLinkStore(type);
+  const index = findPostLinkIndex(type, query);
+  if (index === -1) {
+    return null;
+  }
+
+  items[index] = {
+    ...items[index],
+    name: normalizeLinkName(name),
+    updatedAt: new Date().toISOString()
+  };
+  savePostLinkStore(type);
+  return items[index];
+}
+
 function removePostLinkItem(type, query) {
+  const items = getPostLinkStore(type);
+  const index = findPostLinkIndex(type, query);
+  if (index === -1) {
+    return null;
+  }
+
+  const [removed] = items.splice(index, 1);
+  savePostLinkStore(type);
+  return removed;
+}
+
+function findPostLinkIndex(type, query) {
   const items = getPostLinkStore(type);
   const clean = String(query || '').trim();
   const indexNumber = Number.parseInt(clean, 10);
@@ -2468,13 +2585,7 @@ function removePostLinkItem(type, query) {
     index = items.findIndex((item) => item.url.toLowerCase() === normalized || item.name.toLowerCase() === normalized);
   }
 
-  if (index < 0 || index >= items.length) {
-    return null;
-  }
-
-  const [removed] = items.splice(index, 1);
-  savePostLinkStore(type);
-  return removed;
+  return index >= 0 && index < items.length ? index : -1;
 }
 
 function getPostLinkItems(type) {
@@ -2520,6 +2631,10 @@ function postLinkListCommand(type) {
 
 function postLinkDeleteCommand(type) {
   return type === 'microsite' ? '/deletemicrosite' : '/deleteshop';
+}
+
+function postLinkRenameCommand(type) {
+  return type === 'microsite' ? '/renamemicrosite' : '/renameshop';
 }
 
 function parseIdSet(value) {
