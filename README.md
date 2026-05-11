@@ -152,7 +152,7 @@ Response yang didukung:
 
 `TERABOX_LOGIN_PUPPETEER_ENABLED` opsional. Default `true`. Jika `TERABOX_SESSION_START_API_URL` kosong, tombol `Login TeraBox` memakai browser Puppeteer lokal untuk membuka halaman login, mengambil screenshot QR, dan menyimpan session setelah QR berhasil discan.
 
-`TERABOX_LOGIN_URL` opsional. URL halaman login QR TeraBox. Default sudah diisi di `.env.example`.
+`TERABOX_LOGIN_URL` opsional. URL halaman login TeraBox desktop yang punya tombol QR. Default `https://www.terabox.com/login`.
 
 `TERABOX_LOGIN_TIMEOUT_MS` opsional. Default `180000` atau 3 menit.
 

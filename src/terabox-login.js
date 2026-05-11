@@ -1,6 +1,6 @@
 'use strict';
 
-const DEFAULT_LOGIN_URL = 'https://www.terabox.com/wap/outlogin/login?type=2&redirectUrl=https%3A%2F%2Fwww.terabox.com%2Fdisk%2Fhome%23%2Fall';
+const DEFAULT_LOGIN_URL = 'https://www.terabox.com/login';
 
 async function loginWithQrCode(options = {}) {
   const puppeteer = require('puppeteer');
@@ -17,7 +17,7 @@ async function loginWithQrCode(options = {}) {
   let page;
   try {
     page = await browser.newPage();
-    await page.setViewport({ width: 420, height: 720, deviceScaleFactor: 2 });
+    await page.setViewport({ width: 1280, height: 900, deviceScaleFactor: 1 });
     await page.goto(options.loginUrl || DEFAULT_LOGIN_URL, {
       waitUntil: 'networkidle2',
       timeout: options.navigationTimeoutMs || 45000
@@ -42,26 +42,32 @@ async function loginWithQrCode(options = {}) {
 }
 
 async function preferQrLogin(page) {
-  await page.evaluate(() => {
-    const candidates = [...document.querySelectorAll('button, a, div, span')];
-    const target = candidates.find((item) => {
-      const text = (item.textContent || '').trim().toLowerCase();
-      const aria = (item.getAttribute('aria-label') || '').trim().toLowerCase();
-      const className = String(item.className || '').toLowerCase();
-      return text.includes('qr') ||
-        text.includes('scan') ||
-        text.includes('kode qr') ||
-        text.includes('pindai') ||
-        aria.includes('qr') ||
-        className.includes('qr');
-    });
+  const clicked = await page.evaluate(() => {
+    const visibleBoxes = [...document.querySelectorAll('.other-item .logo')]
+      .map((element) => {
+        const box = element.getBoundingClientRect();
+        return {
+          element,
+          box,
+          visible: box.width > 0 && box.height > 0
+        };
+      })
+      .filter((item) => item.visible);
 
-    if (target) {
-      target.click();
+    const qrButton = visibleBoxes.sort((a, b) => b.box.left - a.box.left)[0];
+    if (qrButton) {
+      qrButton.element.click();
+      return true;
     }
-  }).catch(() => {});
 
-  await sleep(1500);
+    return false;
+  }).catch(() => false);
+
+  if (!clicked) {
+    throw new Error('Tombol QR login TeraBox tidak ditemukan di halaman login.');
+  }
+
+  await sleep(2500);
 }
 
 async function captureQrImage(page, timeoutMs) {
@@ -76,26 +82,21 @@ async function captureQrImage(page, timeoutMs) {
     await sleep(1000);
   }
 
-  return page.screenshot({ type: 'png', fullPage: false });
+  throw new Error('QR login TeraBox tidak muncul. Halaman mungkin berubah atau login QR sedang tidak tersedia.');
 }
 
 async function findQrElement(page) {
   const selectors = [
-    'canvas',
-    'img[src*="qr"]',
-    'img[src*="qrcode"]',
-    '[class*="qr"]',
-    '[class*="QRCode"]',
-    '[class*="qrcode"]',
-    '[id*="qr"]',
-    '[id*="qrcode"]'
+    '.qrcode .qrcode-img',
+    '.qrcode img',
+    'canvas'
   ];
 
   for (const selector of selectors) {
     const handles = await page.$$(selector).catch(() => []);
     for (const handle of handles) {
       const box = await handle.boundingBox().catch(() => null);
-      if (box && box.width >= 80 && box.height >= 80) {
+      if (box && box.width >= 120 && box.height >= 120 && Math.abs(box.width - box.height) <= 30) {
         return handle;
       }
     }
