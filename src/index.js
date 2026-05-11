@@ -107,7 +107,7 @@ async function handleUpdate(update) {
 
   const mode = chatModes.get(chatIdString);
   const teraboxUrls = uniqueUrls(extractUrls(text).filter(isTeraboxUrl));
-  if (mode === MODES.TERABOX_PRO || teraboxUrls.length > 0) {
+  if (mode === MODES.TERABOX_PRO) {
     if (teraboxUrls.length === 0) {
       await reply(chatId, message.message_id, 'Kirim link TeraBox, contoh: https://1024terabox.com/s/xxxxx');
       return;
@@ -117,7 +117,13 @@ async function handleUpdate(update) {
     return;
   }
 
-  const urls = uniqueUrls(extractUrls(text).filter((url) => !isDroplinkUrl(url) && !isTeraboxUrl(url)));
+  const urls = uniqueUrls(extractUrls(text).filter((url) => {
+    if (isDroplinkUrl(url)) {
+      return false;
+    }
+
+    return mode === MODES.SHORTEN || !isTeraboxUrl(url);
+  }));
   if (urls.length === 0) {
     return;
   }
