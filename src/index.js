@@ -1212,7 +1212,7 @@ function formatTeraboxConvertResults(results) {
       results[0].newShareUrl,
       '',
       `File/folder: ${results[0].fileCount}`,
-      `Folder akun: ${results[0].destinationDir}`
+      `Lokasi akun: ${formatSharePaths(results[0])}`
     ].join('\n');
   }
 
@@ -1222,12 +1222,17 @@ function formatTeraboxConvertResults(results) {
         `${index + 1}. ${result.shareUrl}`,
         `=> ${result.newShareUrl}`,
         `File/folder: ${result.fileCount}`,
-        `Folder akun: ${result.destinationDir}`
+        `Lokasi akun: ${formatSharePaths(result)}`
       ].join('\n');
     }
 
     return `${index + 1}. ${result.shareUrl}\nGagal: ${result.error}`;
   }).join('\n\n');
+}
+
+function formatSharePaths(result) {
+  const paths = Array.isArray(result.sharePaths) && result.sharePaths.length > 0 ? result.sharePaths : [result.destinationDir];
+  return paths.slice(0, 3).join(', ');
 }
 
 function formatTeraboxApiPayload(payload) {

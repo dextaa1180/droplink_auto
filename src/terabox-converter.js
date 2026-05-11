@@ -38,16 +38,20 @@ async function convertTeraboxShare(options) {
     throw new Error('Data share_id/from_uk tidak ditemukan dari link TeraBox.');
   }
 
-  const destinationDir = makeDestinationDir(destinationRoot);
-  await ensureRemoteDir(app, destinationRoot);
+  const destinationDir = normalizeRemoteDir(destinationRoot);
   await ensureRemoteDir(app, destinationDir);
+  const beforeItems = await listRemoteFiles(app, destinationDir);
 
   const transfer = await app.shareTransfer(shareId, fromUk, fsIds, destinationDir, { ondup: 'newcopy' });
   assertTeraboxOk(transfer, 'Save to TeraBox gagal');
 
-  await waitForRemoteFiles(app, destinationDir, waitTimeoutMs);
+  const savedItems = await waitForSavedItems(app, destinationDir, files, beforeItems, waitTimeoutMs);
+  const sharePaths = savedItems.map((item) => item.path).filter(Boolean);
+  if (sharePaths.length === 0) {
+    throw new Error('File sudah tersimpan, tapi path asli hasil save tidak ditemukan.');
+  }
 
-  const share = await app.shareSet([destinationDir], sharePassword, sharePeriod);
+  const share = await app.shareSet(sharePaths, sharePassword, sharePeriod);
   assertTeraboxOk(share, 'Generate share link gagal');
 
   const newShareUrl = findShareUrl(share);
@@ -59,6 +63,7 @@ async function convertTeraboxShare(options) {
     sourceUrl: shareUrl,
     newShareUrl,
     destinationDir,
+    sharePaths,
     fileCount: fsIds.length,
     taskId: transfer.task_id || transfer.taskid || transfer.taskId || '',
     rawTransfer: transfer,
@@ -111,21 +116,54 @@ async function ensureRemoteDir(app, remoteDir) {
   }
 }
 
-async function waitForRemoteFiles(app, remoteDir, timeoutMs) {
+async function listRemoteFiles(app, remoteDir) {
+  const payload = await app.getRemoteDir(remoteDir).catch(() => null);
+  return getRemoteFiles(payload);
+}
+
+async function waitForSavedItems(app, remoteDir, sourceFiles, beforeItems, timeoutMs) {
   const deadline = Date.now() + timeoutMs;
+  const expectedNames = uniqueStrings(sourceFiles.map((file) => file.server_filename || file.filename || file.name));
+  const expectedCount = Math.max(1, expectedNames.length);
+  const beforePaths = new Set((beforeItems || []).map((item) => item.path).filter(Boolean));
   let lastPayload = null;
 
   while (Date.now() < deadline) {
     lastPayload = await app.getRemoteDir(remoteDir).catch((error) => ({ error: error.message }));
     const files = getRemoteFiles(lastPayload);
-    if (files.length > 0) {
-      return files;
+    const matched = matchSavedItems(files, expectedNames, beforePaths);
+    if (matched.length >= expectedCount) {
+      return matched;
     }
 
     await sleep(2500);
   }
 
   throw new Error(`File belum muncul di ${remoteDir} setelah save. Response terakhir: ${truncateJson(lastPayload)}`);
+}
+
+function matchSavedItems(remoteFiles, expectedNames, beforePaths) {
+  const matched = [];
+
+  for (const file of remoteFiles) {
+    const path = file.path || file.server_path || file.path_name || '';
+    if (path && !beforePaths.has(path)) {
+      matched.push({ ...file, path });
+      continue;
+    }
+
+    const name = file.server_filename || file.filename || file.name || lastPathPart(file.path);
+    if (!expectedNames.includes(name)) {
+      continue;
+    }
+
+    matched.push({
+      ...file,
+      path
+    });
+  }
+
+  return matched;
 }
 
 function getShareFiles(payload) {
@@ -141,7 +179,7 @@ function getRemoteFiles(payload) {
     return [];
   }
 
-  return firstArray(payload.list, payload.records);
+  return firstArray(payload.list, payload.records, payload.data && payload.data.list, payload.data && payload.data.records);
 }
 
 function firstArray(...values) {
@@ -169,13 +207,6 @@ function cleanShortUrl(value) {
   return String(value || '').trim().replace(/^\/+/, '').replace(/[^\w-].*$/g, '');
 }
 
-function makeDestinationDir(root) {
-  const cleanRoot = normalizeRemoteDir(root || '/Tuna Bot');
-  const stamp = new Date().toISOString().replace(/[-:.TZ]/g, '').slice(0, 14);
-  const suffix = Math.random().toString(36).slice(2, 7);
-  return `${cleanRoot}/convert-${stamp}-${suffix}`;
-}
-
 function normalizeRemoteDir(value) {
   const clean = String(value || '').trim().replace(/\\/g, '/').replace(/\/+/g, '/');
   if (!clean || clean === '/') {
@@ -183,6 +214,10 @@ function normalizeRemoteDir(value) {
   }
 
   return clean.startsWith('/') ? clean.replace(/\/$/g, '') : `/${clean.replace(/\/$/g, '')}`;
+}
+
+function lastPathPart(value) {
+  return String(value || '').split('/').filter(Boolean).pop() || '';
 }
 
 function findShareUrl(payload) {
