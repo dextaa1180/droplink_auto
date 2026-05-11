@@ -5,6 +5,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { DEFAULT_JPG6_LOGIN_URL, loginJpg6Manually, verifyJpg6Session } = require('./jpg6-login');
 const { buildPostText, createPostDraft, setDraftField, setDraftStep } = require('./post-builder');
+const { createTelegraphAccount, createTelegraphPreviewPage, uploadImageToTelegraph } = require('./telegraph-preview');
 const { convertTeraboxShare } = require('./terabox-converter');
 const { DEFAULT_LOGIN_URL, loginWithQrCode } = require('./terabox-login');
 
@@ -16,6 +17,7 @@ const droplinkHost = safeHost(config.droplinkBaseUrl);
 const chatModes = new Map();
 const teraboxSessions = loadSessionStore(config.sessionStorePath);
 let jpg6Session = loadJpg6Session(config.jpg6SessionStorePath);
+let telegraphAccount = loadTelegraphAccount(config.telegraphAccountStorePath);
 const postChannels = loadChannelStore(config.postChannelStorePath);
 const postShops = loadLinkStore(config.postShopStorePath, 'shops');
 const postMicrosites = loadLinkStore(config.postMicrositeStorePath, 'microsites');
@@ -23,6 +25,7 @@ const activeTeraboxLogins = new Map();
 const activeJpg6Logins = new Map();
 const postDrafts = new Map();
 const postActionLinks = new Map();
+const previewDrafts = new Map();
 
 const MODES = {
   SHORTEN: 'shorten',
@@ -33,6 +36,7 @@ const MODES = {
 
 const MENU_BUTTONS = {
   BUAT_POST: 'Buat Post',
+  BUAT_PREVIEW: 'Buat Preview',
   SHORTEN: 'Shorten Link',
   TERABOX_PRO: 'TeraBox Pro',
   TERABOX_CONVERT: 'Convert TeraBox',
@@ -56,6 +60,8 @@ const MENU_BUTTONS = {
   POST_EDIT_SHOP: 'Edit Shop',
   POST_EDIT_MICROSITE: 'Edit Microsite',
   POST_BACK_REVIEW: 'Kembali Preview',
+  PREVIEW_DONE: 'Selesai Preview',
+  PREVIEW_CANCEL: 'Batal Preview',
   HELP: 'Bantuan'
 };
 
@@ -127,6 +133,11 @@ async function handleUpdate(update) {
   }
 
   const text = getMessageText(message);
+  if (previewDrafts.has(getPreviewDraftKey(message)) && hasPreviewMedia(message)) {
+    await handlePreviewMediaMessage(message);
+    return;
+  }
+
   if (!text) {
     return;
   }
@@ -134,6 +145,11 @@ async function handleUpdate(update) {
   const command = parseCommand(text);
   if (command) {
     await handleCommand(message, command);
+    return;
+  }
+
+  if (previewDrafts.has(getPreviewDraftKey(message))) {
+    await handlePreviewTextMessage(message, text);
     return;
   }
 
@@ -211,6 +227,11 @@ async function handleCommand(message, command) {
 
   if (command.name === 'buatpost' || command.name === 'buat_post' || command.name === 'post') {
     await startManualPostBuilder(message);
+    return;
+  }
+
+  if (command.name === 'preview' || command.name === 'buatpreview' || command.name === 'buat_preview') {
+    await startTelegraphPreview(message);
     return;
   }
 
@@ -360,6 +381,11 @@ async function handleMenuAction(message, action) {
     return;
   }
 
+  if (action === 'preview_builder') {
+    await startTelegraphPreview(message);
+    return;
+  }
+
   if (action === MODES.SHORTEN) {
     chatModes.set(String(chatId), MODES.SHORTEN);
     await reply(chatId, message.message_id, 'Mode Shorten aktif. Kirim link yang ingin dibuat shortlink Droplink.');
@@ -441,6 +467,12 @@ async function startManualPostBuilder(message, initial = {}) {
     `Link konten sudah terisi: ${initial.contentLink}`,
     '',
     'Kirim deskripsi konten untuk postingan ini.'
+  ] : initial.previewLink ? [
+    'Mode Buat Post aktif.',
+    '',
+    `Link preview sudah terisi: ${initial.previewLink}`,
+    '',
+    'Kirim deskripsi konten untuk postingan ini.'
   ] : [
     'Mode Buat Post aktif.',
     '',
@@ -505,6 +537,22 @@ async function handlePostBuilderMessage(message, text) {
       draft = clearDraftEdit(setDraftStep(draft, 'review'));
       postDrafts.set(draftKey, draft);
       await sendPostDraftReview(message, draft);
+      return;
+    }
+
+    if (draft.previewLink) {
+      const nextStep = draft.contentLink ? 'shop_link' : 'content_link';
+      draft = setDraftStep(draft, nextStep);
+      postDrafts.set(draftKey, draft);
+
+      if (nextStep === 'shop_link') {
+        await startPostLinkSelection(message, draft, 'shop');
+        return;
+      }
+
+      await reply(chatId, message.message_id, 'Kirim link konten untuk postingan ini.', {
+        reply_markup: postBuilderKeyboard('content_link')
+      });
       return;
     }
 
@@ -710,6 +758,139 @@ async function handlePostEditSelection(message, draft, text) {
   });
 }
 
+async function startTelegraphPreview(message) {
+  if (!message.from || !message.from.id) {
+    await reply(message.chat.id, message.message_id, 'Fitur preview hanya bisa dipakai dari chat user.');
+    return;
+  }
+
+  const draft = {
+    userId: String(message.from.id),
+    chatId: String(message.chat.id),
+    images: [],
+    mediaGroups: [],
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+  previewDrafts.set(getPreviewDraftKey(message), draft);
+
+  await reply(message.chat.id, message.message_id, [
+    'Mode Buat Preview aktif.',
+    '',
+    'Kirim foto satu per satu atau sebagai album Telegram.',
+    'Setelah selesai, pilih Selesai Preview.'
+  ].join('\n'), {
+    reply_markup: previewKeyboard()
+  });
+}
+
+async function handlePreviewMediaMessage(message) {
+  const draftKey = getPreviewDraftKey(message);
+  const draft = previewDrafts.get(draftKey);
+  const image = getPreviewImageFromMessage(message);
+
+  if (!image) {
+    await reply(message.chat.id, message.message_id, 'Kirim foto atau dokumen gambar untuk preview.', {
+      reply_markup: previewKeyboard()
+    });
+    return;
+  }
+
+  if (draft.images.length >= config.telegraphPreviewMaxImages) {
+    await reply(message.chat.id, message.message_id, `Batas preview ${config.telegraphPreviewMaxImages} gambar. Pilih Selesai Preview atau Batal Preview.`, {
+      reply_markup: previewKeyboard()
+    });
+    return;
+  }
+
+  draft.images.push(image);
+  draft.updatedAt = new Date().toISOString();
+  previewDrafts.set(draftKey, draft);
+
+  if (message.media_group_id) {
+    if (!draft.mediaGroups.includes(message.media_group_id)) {
+      draft.mediaGroups.push(message.media_group_id);
+      await reply(message.chat.id, message.message_id, 'Album diterima. Setelah semua foto terkirim, pilih Selesai Preview.', {
+        reply_markup: previewKeyboard()
+      });
+    }
+    return;
+  }
+
+  await reply(message.chat.id, message.message_id, `Foto diterima. Total: ${draft.images.length}.`, {
+    reply_markup: previewKeyboard()
+  });
+}
+
+async function handlePreviewTextMessage(message, text) {
+  const normalized = text.trim().toLowerCase();
+  if (normalized === MENU_BUTTONS.PREVIEW_CANCEL.toLowerCase() || normalized === '/batal' || normalized === '/cancel') {
+    previewDrafts.delete(getPreviewDraftKey(message));
+    await reply(message.chat.id, message.message_id, 'Draft preview dibatalkan.', {
+      reply_markup: menuKeyboard()
+    });
+    return;
+  }
+
+  if (normalized === MENU_BUTTONS.PREVIEW_DONE.toLowerCase()) {
+    await finishTelegraphPreview(message);
+    return;
+  }
+
+  await reply(message.chat.id, message.message_id, 'Kirim foto lagi, pilih Selesai Preview, atau Batal Preview.', {
+    reply_markup: previewKeyboard()
+  });
+}
+
+async function finishTelegraphPreview(message) {
+  const draftKey = getPreviewDraftKey(message);
+  const draft = previewDrafts.get(draftKey);
+  if (!draft || draft.images.length === 0) {
+    await reply(message.chat.id, message.message_id, 'Belum ada foto. Kirim foto dulu untuk dibuat preview.', {
+      reply_markup: previewKeyboard()
+    });
+    return;
+  }
+
+  await telegram('sendChatAction', {
+    chat_id: message.chat.id,
+    action: 'upload_photo'
+  });
+
+  try {
+    const account = await ensureTelegraphAccount();
+    const imageUrls = [];
+
+    for (const [index, image] of draft.images.entries()) {
+      const buffer = await downloadTelegramFileBuffer(image.fileId);
+      const imageUrl = await uploadImageToTelegraph(buffer, image.filename || `preview-${index + 1}.jpg`);
+      imageUrls.push(imageUrl);
+    }
+
+    const page = await createTelegraphPreviewPage({
+      accessToken: account.access_token,
+      title: createPreviewTitle(),
+      authorName: config.telegraphAuthorName,
+      authorUrl: config.telegraphAuthorUrl,
+      imageUrls
+    });
+
+    previewDrafts.delete(draftKey);
+    await reply(message.chat.id, message.message_id, [
+      '✅ Preview berhasil dibuat',
+      `🔗 ${page.url}`,
+      '',
+      `Total foto: ${imageUrls.length}`
+    ].join('\n'), {
+      reply_markup: postFromPreviewKeyboard(page.url)
+    });
+  } catch (error) {
+    await reply(message.chat.id, message.message_id, `Gagal membuat preview: ${error.message}`, {
+      reply_markup: previewKeyboard()
+    });
+  }
+}
+
 async function handleCallbackQuery(callbackQuery) {
   const data = callbackQuery.data || '';
   const message = callbackQuery.message;
@@ -741,6 +922,25 @@ async function handleCallbackQuery(callbackQuery) {
       from: callbackQuery.from
     }, {
       contentLink
+    });
+    return;
+  }
+
+  if (data.startsWith('post_from_preview:')) {
+    const token = data.slice('post_from_preview:'.length);
+    const previewLink = takePostActionLink(token);
+
+    if (!previewLink) {
+      await answerCallbackQuery(callbackQuery.id, 'Tombol sudah expired. Buat preview lagi.', true);
+      return;
+    }
+
+    await answerCallbackQuery(callbackQuery.id, 'Link preview masuk ke draft post.');
+    await startManualPostBuilder({
+      ...message,
+      from: callbackQuery.from
+    }, {
+      previewLink
     });
     return;
   }
@@ -1631,6 +1831,29 @@ async function answerCallbackQuery(callbackQueryId, text, showAlert = false) {
   });
 }
 
+async function downloadTelegramFileBuffer(fileId) {
+  const file = await telegram('getFile', {
+    file_id: fileId
+  });
+
+  if (!file || !file.file_path) {
+    throw new Error('Telegram tidak mengembalikan file_path.');
+  }
+
+  const response = await fetch(`${telegramFileBaseUrl()}/${file.file_path}`, {
+    signal: AbortSignal.timeout(config.requestTimeoutMs * 4)
+  });
+  if (!response.ok) {
+    throw new Error(`Download file Telegram HTTP ${response.status}`);
+  }
+
+  return Buffer.from(await response.arrayBuffer());
+}
+
+function telegramFileBaseUrl() {
+  return `https://api.telegram.org/file/bot${config.telegramBotToken}`;
+}
+
 async function getBotInfo() {
   if (!getBotInfo.promise) {
     getBotInfo.promise = telegram('getMe', {});
@@ -1660,6 +1883,12 @@ function readConfig() {
     postChannelStorePath: resolveWorkspacePath(process.env.POST_CHANNEL_STORE_FILE || path.join(process.env.DATA_DIR || 'data', 'post-channels.json')),
     postShopStorePath: resolveWorkspacePath(process.env.POST_SHOP_STORE_FILE || path.join(process.env.DATA_DIR || 'data', 'post-shops.json')),
     postMicrositeStorePath: resolveWorkspacePath(process.env.POST_MICROSITE_STORE_FILE || path.join(process.env.DATA_DIR || 'data', 'post-microsites.json')),
+    telegraphAccessToken: (process.env.TELEGRAPH_ACCESS_TOKEN || '').trim(),
+    telegraphShortName: (process.env.TELEGRAPH_SHORT_NAME || 'TunaPreview').trim(),
+    telegraphAuthorName: (process.env.TELEGRAPH_AUTHOR_NAME || 'Tuna').trim(),
+    telegraphAuthorUrl: optionalUrl(process.env.TELEGRAPH_AUTHOR_URL || '', 'TELEGRAPH_AUTHOR_URL'),
+    telegraphAccountStorePath: resolveWorkspacePath(process.env.TELEGRAPH_ACCOUNT_STORE_FILE || path.join(process.env.DATA_DIR || 'data', 'telegraph-account.json')),
+    telegraphPreviewMaxImages: parsePositiveInt(process.env.TELEGRAPH_PREVIEW_MAX_IMAGES, 20),
     teraboxDashboardUserIds: parseIdSet(process.env.TERABOX_DASHBOARD_USER_IDS || ''),
     maxUrlsPerMessage: parsePositiveInt(process.env.MAX_URLS_PER_MESSAGE, 5),
     requestTimeoutMs: parsePositiveInt(process.env.REQUEST_TIMEOUT_MS, 15000),
@@ -1771,6 +2000,10 @@ function parseMenuButton(text) {
 
   if (normalized === MENU_BUTTONS.BUAT_POST.toLowerCase()) {
     return MODES.POST_BUILDER;
+  }
+
+  if (normalized === MENU_BUTTONS.BUAT_PREVIEW.toLowerCase()) {
+    return 'preview_builder';
   }
 
   if (normalized === MENU_BUTTONS.SHORTEN.toLowerCase()) {
@@ -2188,6 +2421,7 @@ function helpText() {
     '/listmicrosite',
     '/renamemicrosite 1 Nama Baru',
     '/deletemicrosite 1',
+    '/preview',
     '/jpg6_login',
     '/jpg6_status',
     '/jpg6_logout',
@@ -2210,6 +2444,7 @@ function menuText() {
     'Pilih menu:',
     '',
     `${MENU_BUTTONS.BUAT_POST} - susun postingan channel manual`,
+    `${MENU_BUTTONS.BUAT_PREVIEW} - upload foto ke Telegra.ph preview`,
     `${MENU_BUTTONS.SHORTEN} - buat shortlink Droplink`,
     `${MENU_BUTTONS.TERABOX_PRO} - ambil metadata/download link TeraBox`,
     `${MENU_BUTTONS.TERABOX_CONVERT} - save ke akun dan buat share link baru`,
@@ -2221,7 +2456,7 @@ function menuText() {
 function menuKeyboard() {
   return {
     keyboard: [
-      [{ text: MENU_BUTTONS.BUAT_POST }],
+      [{ text: MENU_BUTTONS.BUAT_POST }, { text: MENU_BUTTONS.BUAT_PREVIEW }],
       [{ text: MENU_BUTTONS.SHORTEN }, { text: MENU_BUTTONS.TERABOX_PRO }],
       [{ text: MENU_BUTTONS.TERABOX_CONVERT }, { text: MENU_BUTTONS.TERABOX_DASHBOARD }],
       [{ text: MENU_BUTTONS.HELP }]
@@ -2229,6 +2464,18 @@ function menuKeyboard() {
     resize_keyboard: true,
     one_time_keyboard: false,
     input_field_placeholder: 'Pilih menu atau kirim link'
+  };
+}
+
+function previewKeyboard() {
+  return {
+    keyboard: [
+      [{ text: MENU_BUTTONS.PREVIEW_DONE }],
+      [{ text: MENU_BUTTONS.PREVIEW_CANCEL }]
+    ],
+    resize_keyboard: true,
+    one_time_keyboard: false,
+    input_field_placeholder: 'Kirim foto preview'
   };
 }
 
@@ -2330,6 +2577,16 @@ function postFromResultsKeyboard(results) {
     });
 
   return buttons.length > 0 ? { inline_keyboard: buttons } : undefined;
+}
+
+function postFromPreviewKeyboard(previewUrl) {
+  const token = savePostActionLink(previewUrl);
+  return {
+    inline_keyboard: [[{
+      text: 'Langsung Post',
+      callback_data: `post_from_preview:${token}`
+    }]]
+  };
 }
 
 function teraboxDashboardText(session) {
@@ -2541,6 +2798,35 @@ function getPostDraftKey(message) {
   return userId ? `user:${userId}` : `chat:${message.chat.id}`;
 }
 
+function getPreviewDraftKey(message) {
+  const userId = message.from && message.from.id;
+  return userId ? `user:${userId}` : `chat:${message.chat.id}`;
+}
+
+function hasPreviewMedia(message) {
+  return Boolean(getPreviewImageFromMessage(message));
+}
+
+function getPreviewImageFromMessage(message) {
+  if (Array.isArray(message.photo) && message.photo.length > 0) {
+    const photo = message.photo[message.photo.length - 1];
+    return {
+      fileId: photo.file_id,
+      filename: `${photo.file_unique_id || photo.file_id}.jpg`
+    };
+  }
+
+  const document = message.document;
+  if (document && /^image\//i.test(document.mime_type || '') && document.file_id) {
+    return {
+      fileId: document.file_id,
+      filename: sanitizeFilename(document.file_name || `${document.file_unique_id || document.file_id}.jpg`)
+    };
+  }
+
+  return null;
+}
+
 function isPostCancelText(text) {
   const normalized = text.trim().toLowerCase();
   return normalized === MENU_BUTTONS.POST_CANCEL.toLowerCase() || normalized === '/batal' || normalized === '/cancel';
@@ -2624,6 +2910,49 @@ function parseRenameBody(body) {
   }
 
   return { query, name };
+}
+
+async function ensureTelegraphAccount() {
+  if (config.telegraphAccessToken) {
+    return {
+      access_token: config.telegraphAccessToken,
+      short_name: config.telegraphShortName,
+      author_name: config.telegraphAuthorName,
+      author_url: config.telegraphAuthorUrl
+    };
+  }
+
+  if (telegraphAccount && telegraphAccount.access_token) {
+    return telegraphAccount;
+  }
+
+  telegraphAccount = await createTelegraphAccount({
+    shortName: config.telegraphShortName,
+    authorName: config.telegraphAuthorName,
+    authorUrl: config.telegraphAuthorUrl
+  });
+  saveTelegraphAccountStore();
+  return telegraphAccount;
+}
+
+function createPreviewTitle(now = new Date()) {
+  return `ASUPAN ${formatDateForTitle(now, config.postTimeZone)}`;
+}
+
+function formatDateForTitle(date, timeZone) {
+  const parts = new Intl.DateTimeFormat('id-ID', {
+    timeZone,
+    day: '2-digit',
+    month: 'long',
+    year: 'numeric'
+  }).formatToParts(date);
+  const values = Object.fromEntries(parts.map((part) => [part.type, part.value]));
+  return `${values.day} ${values.month} ${values.year}`;
+}
+
+function sanitizeFilename(value) {
+  const clean = String(value || '').replace(/[^\w.\-]+/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '');
+  return clean || 'image.jpg';
 }
 
 async function validateBotChannelAdmin(channelId) {
@@ -3004,6 +3333,20 @@ function loadJpg6Session(filePath) {
   }
 }
 
+function loadTelegraphAccount(filePath) {
+  if (!fs.existsSync(filePath)) {
+    return null;
+  }
+
+  try {
+    const parsed = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+    return parsed && typeof parsed === 'object' && parsed.access_token ? parsed : null;
+  } catch (error) {
+    console.warn(`[telegraph-account] Gagal baca ${filePath}: ${error.message}`);
+    return null;
+  }
+}
+
 function loadChannelStore(filePath) {
   if (!fs.existsSync(filePath)) {
     return [];
@@ -3060,6 +3403,13 @@ function saveJpg6SessionStore() {
   const tempPath = `${config.jpg6SessionStorePath}.tmp`;
   fs.writeFileSync(tempPath, JSON.stringify(jpg6Session || {}, null, 2));
   fs.renameSync(tempPath, config.jpg6SessionStorePath);
+}
+
+function saveTelegraphAccountStore() {
+  fs.mkdirSync(path.dirname(config.telegraphAccountStorePath), { recursive: true });
+  const tempPath = `${config.telegraphAccountStorePath}.tmp`;
+  fs.writeFileSync(tempPath, JSON.stringify(telegraphAccount || {}, null, 2));
+  fs.renameSync(tempPath, config.telegraphAccountStorePath);
 }
 
 function saveJpg6SessionFromLogin(result) {

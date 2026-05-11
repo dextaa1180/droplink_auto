@@ -9,7 +9,7 @@ function createPostDraft(userId, chatId, initial = {}) {
     chatId: String(chatId),
     step: initial.contentLink ? 'description' : 'description',
     description: '',
-    previewLink: '',
+    previewLink: initial.previewLink || '',
     contentLink: initial.contentLink || '',
     shopLink: initial.shopLink || '',
     micrositeLink: initial.micrositeLink || '',

@@ -22,7 +22,6 @@ Focus on **building and extending bot features** including:
 **Tech Stack**: Node.js (≥18), Puppeteer, Telegram Bot API, terabox-api  
 **Key Components**:
 - `src/index.js` — Main bot loop, menu setup, mode routing
-- `src/jpg6-login.js` — JPG6 authentication
 - `src/terabox-login.js` — TeraBox session management
 - `src/terabox-converter.js` — TeraBox file operations
 - `src/telegraph-preview.js` — Telegraph preview generation
