@@ -2,6 +2,7 @@
 
 const fs = require('node:fs');
 const path = require('node:path');
+const { convertTeraboxShare } = require('./terabox-converter');
 const { DEFAULT_LOGIN_URL, loginWithQrCode } = require('./terabox-login');
 
 loadEnvFile(path.join(process.cwd(), '.env'));
@@ -15,12 +16,14 @@ const activeTeraboxLogins = new Map();
 
 const MODES = {
   SHORTEN: 'shorten',
-  TERABOX_PRO: 'terabox_pro'
+  TERABOX_PRO: 'terabox_pro',
+  TERABOX_CONVERT: 'terabox_convert'
 };
 
 const MENU_BUTTONS = {
   SHORTEN: 'Shorten Link',
   TERABOX_PRO: 'TeraBox Pro',
+  TERABOX_CONVERT: 'Convert TeraBox',
   TERABOX_DASHBOARD: 'Dashboard TeraBox',
   TERABOX_LOGIN: 'Login TeraBox',
   TERABOX_CONNECT: 'Hubungkan TeraBox',
@@ -120,6 +123,16 @@ async function handleUpdate(update) {
     return;
   }
 
+  if (mode === MODES.TERABOX_CONVERT) {
+    if (teraboxUrls.length === 0) {
+      await reply(chatId, message.message_id, 'Kirim link TeraBox yang mau disimpan ulang ke akun dan dibuat share link baru.');
+      return;
+    }
+
+    await convertTeraboxAndReply(message, teraboxUrls);
+    return;
+  }
+
   const urls = uniqueUrls(extractUrls(text).filter((url) => {
     if (isDroplinkUrl(url)) {
       return false;
@@ -159,7 +172,7 @@ async function handleCommand(message, command) {
     return;
   }
 
-  if (command.name === 'terabox_pro' || command.name === 'terabox' || command.name === 'pindah') {
+  if (command.name === 'terabox_pro' || command.name === 'terabox') {
     const urls = uniqueUrls(extractUrls(command.body).filter(isTeraboxUrl));
     if (urls.length === 0) {
       chatModes.set(String(chatId), MODES.TERABOX_PRO);
@@ -168,6 +181,18 @@ async function handleCommand(message, command) {
     }
 
     await reshareTeraboxAndReply(message, urls);
+    return;
+  }
+
+  if (command.name === 'convert_terabox' || command.name === 'terabox_convert' || command.name === 'convert' || command.name === 'pindah') {
+    const urls = uniqueUrls(extractUrls(command.body).filter(isTeraboxUrl));
+    if (urls.length === 0) {
+      chatModes.set(String(chatId), MODES.TERABOX_CONVERT);
+      await reply(chatId, message.message_id, 'Mode Convert TeraBox aktif. Kirim link TeraBox yang mau disimpan ulang dan dibuat share link baru.');
+      return;
+    }
+
+    await convertTeraboxAndReply(message, urls);
     return;
   }
 
@@ -211,6 +236,12 @@ async function handleMenuAction(message, action) {
   if (action === MODES.TERABOX_PRO) {
     chatModes.set(String(chatId), MODES.TERABOX_PRO);
     await reply(chatId, message.message_id, 'Mode TeraBox Pro aktif. Kirim link TeraBox untuk mengambil metadata, download link, dan stream link dari API.');
+    return;
+  }
+
+  if (action === MODES.TERABOX_CONVERT) {
+    chatModes.set(String(chatId), MODES.TERABOX_CONVERT);
+    await reply(chatId, message.message_id, 'Mode Convert TeraBox aktif. Kirim link TeraBox untuk save ke akun, lalu bot buat share link baru.');
     return;
   }
 
@@ -294,6 +325,47 @@ async function reshareTeraboxAndReply(message, urls) {
   }
 
   await reply(chatId, message.message_id, formatTeraboxResults(results));
+}
+
+async function convertTeraboxAndReply(message, urls) {
+  const chatId = message.chat.id;
+  const session = getMessageUserSession(message);
+
+  if (!session || session.status !== 'connected' || session.authType !== 'ndus') {
+    await reply(chatId, message.message_id, 'Session TeraBox belum siap. Buka Dashboard TeraBox lalu pilih Login TeraBox dulu.', {
+      reply_markup: teraboxDashboardKeyboard()
+    });
+    return;
+  }
+
+  const limitedUrls = uniqueUrls(urls).slice(0, config.maxUrlsPerMessage);
+  if (urls.length > limitedUrls.length) {
+    await reply(chatId, message.message_id, `Saya proses ${limitedUrls.length} link TeraBox pertama dulu.`);
+  }
+
+  await telegram('sendChatAction', {
+    chat_id: chatId,
+    action: 'typing'
+  });
+
+  const results = [];
+  for (const shareUrl of limitedUrls) {
+    try {
+      const output = await convertTeraboxShare({
+        ndus: session.sessionId,
+        shareUrl,
+        destinationRoot: config.teraboxConvertDestinationRoot,
+        sharePassword: config.teraboxConvertSharePassword,
+        sharePeriod: config.teraboxConvertSharePeriod,
+        waitTimeoutMs: config.teraboxConvertWaitTimeoutMs
+      });
+      results.push({ shareUrl, ...output });
+    } catch (error) {
+      results.push({ shareUrl, error: error.message });
+    }
+  }
+
+  await reply(chatId, message.message_id, formatTeraboxConvertResults(results));
 }
 
 async function reshareTeraboxLink(shareUrl, message) {
@@ -755,6 +827,10 @@ function readConfig() {
     teraboxLoginTimeoutMs: parsePositiveInt(process.env.TERABOX_LOGIN_TIMEOUT_MS, 180000),
     teraboxLoginHeadless: parseBool(process.env.TERABOX_LOGIN_HEADLESS, true),
     teraboxLoginExecutablePath: (process.env.PUPPETEER_EXECUTABLE_PATH || '').trim(),
+    teraboxConvertDestinationRoot: normalizeRemoteConfigDir(process.env.TERABOX_CONVERT_DESTINATION_ROOT || '/Tuna Bot'),
+    teraboxConvertSharePassword: cleanTeraboxSharePassword(process.env.TERABOX_CONVERT_SHARE_PASSWORD || ''),
+    teraboxConvertSharePeriod: parseNonNegativeInt(process.env.TERABOX_CONVERT_SHARE_PERIOD, 0),
+    teraboxConvertWaitTimeoutMs: parsePositiveInt(process.env.TERABOX_CONVERT_WAIT_TIMEOUT_MS, 30000),
     sessionStorePath: resolveWorkspacePath(process.env.TERABOX_SESSION_STORE_FILE || path.join(process.env.DATA_DIR || 'data', 'terabox-sessions.json'))
   };
 }
@@ -846,8 +922,12 @@ function parseMenuButton(text) {
     return MODES.TERABOX_PRO;
   }
 
+  if (normalized === MENU_BUTTONS.TERABOX_CONVERT.toLowerCase()) {
+    return MODES.TERABOX_CONVERT;
+  }
+
   if (normalized === 'convert terabox' || normalized === 'pindah terabox') {
-    return MODES.TERABOX_PRO;
+    return MODES.TERABOX_CONVERT;
   }
 
   if (normalized === MENU_BUTTONS.TERABOX_DASHBOARD.toLowerCase()) {
@@ -1126,6 +1206,30 @@ function formatTeraboxResults(results) {
   }).join('\n\n');
 }
 
+function formatTeraboxConvertResults(results) {
+  if (results.length === 1 && results[0].newShareUrl) {
+    return [
+      results[0].newShareUrl,
+      '',
+      `File/folder: ${results[0].fileCount}`,
+      `Folder akun: ${results[0].destinationDir}`
+    ].join('\n');
+  }
+
+  return results.map((result, index) => {
+    if (result.newShareUrl) {
+      return [
+        `${index + 1}. ${result.shareUrl}`,
+        `=> ${result.newShareUrl}`,
+        `File/folder: ${result.fileCount}`,
+        `Folder akun: ${result.destinationDir}`
+      ].join('\n');
+    }
+
+    return `${index + 1}. ${result.shareUrl}\nGagal: ${result.error}`;
+  }).join('\n\n');
+}
+
 function formatTeraboxApiPayload(payload) {
   if (!payload || typeof payload !== 'object') {
     return '';
@@ -1184,6 +1288,7 @@ function helpText() {
   return [
     'Kirim link biasa untuk dibuat shortlink Droplink.',
     'Kirim link TeraBox untuk diproses lewat mode TeraBox Pro.',
+    'Pakai Convert TeraBox untuk save link ke akun lalu buat share link baru.',
     '',
     'Contoh:',
     '/short https://example.com',
@@ -1191,6 +1296,8 @@ function helpText() {
     '/short https://example.com alias=nama-alias',
     '/terabox_pro https://1024terabox.com/s/xxxxx',
     '/terabox https://1024terabox.com/s/xxxxx',
+    '/convert_terabox https://1024terabox.com/s/xxxxx',
+    '/pindah https://1024terabox.com/s/xxxxx',
     '/terabox_dashboard',
     '/terabox_login',
     '/terabox_connect',
@@ -1207,6 +1314,7 @@ function menuText() {
     '',
     `${MENU_BUTTONS.SHORTEN} - buat shortlink Droplink`,
     `${MENU_BUTTONS.TERABOX_PRO} - ambil metadata/download link TeraBox`,
+    `${MENU_BUTTONS.TERABOX_CONVERT} - save ke akun dan buat share link baru`,
     `${MENU_BUTTONS.TERABOX_DASHBOARD} - kelola session pribadi`,
     `${MENU_BUTTONS.HELP} - lihat bantuan`
   ].join('\n');
@@ -1216,7 +1324,8 @@ function menuKeyboard() {
   return {
     keyboard: [
       [{ text: MENU_BUTTONS.SHORTEN }, { text: MENU_BUTTONS.TERABOX_PRO }],
-      [{ text: MENU_BUTTONS.TERABOX_DASHBOARD }, { text: MENU_BUTTONS.HELP }]
+      [{ text: MENU_BUTTONS.TERABOX_CONVERT }, { text: MENU_BUTTONS.TERABOX_DASHBOARD }],
+      [{ text: MENU_BUTTONS.HELP }]
     ],
     resize_keyboard: true,
     one_time_keyboard: false,
@@ -1242,6 +1351,7 @@ function teraboxDashboardKeyboard() {
       [{ text: MENU_BUTTONS.TERABOX_LOGIN }, { text: MENU_BUTTONS.TERABOX_STATUS }],
       [{ text: MENU_BUTTONS.TERABOX_DISCONNECT }],
       [{ text: MENU_BUTTONS.SHORTEN }, { text: MENU_BUTTONS.TERABOX_PRO }],
+      [{ text: MENU_BUTTONS.TERABOX_CONVERT }],
       [{ text: MENU_BUTTONS.TERABOX_DASHBOARD }, { text: MENU_BUTTONS.HELP }]
     ],
     resize_keyboard: true,
@@ -1370,6 +1480,11 @@ function parsePositiveInt(value, fallback) {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 }
 
+function parseNonNegativeInt(value, fallback) {
+  const parsed = Number.parseInt(value, 10);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback;
+}
+
 function parseBool(value, fallback) {
   if (value === undefined || value === null || String(value).trim() === '') {
     return fallback;
@@ -1385,6 +1500,28 @@ function cleanHeaderName(value) {
   }
 
   return clean;
+}
+
+function cleanTeraboxSharePassword(value) {
+  const clean = String(value || '').trim();
+  if (!clean) {
+    return '';
+  }
+
+  if (!/^[a-z0-9]{4}$/i.test(clean)) {
+    throw new Error('TERABOX_CONVERT_SHARE_PASSWORD harus kosong atau 4 karakter alfanumerik.');
+  }
+
+  return clean;
+}
+
+function normalizeRemoteConfigDir(value) {
+  const clean = String(value || '').trim().replace(/\\/g, '/').replace(/\/+/g, '/');
+  if (!clean || clean === '/') {
+    return '/Tuna Bot';
+  }
+
+  return clean.startsWith('/') ? clean.replace(/\/$/g, '') : `/${clean.replace(/\/$/g, '')}`;
 }
 
 function cleanBaseUrl(value) {

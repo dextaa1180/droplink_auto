@@ -4,11 +4,12 @@ Bot Telegram untuk auto-shortener link lewat API Droplink.co.
 
 ## Fitur
 
-- Menu tombol Telegram: `Shorten Link`, `TeraBox Pro`, `Dashboard TeraBox`, dan `Bantuan`.
+- Menu tombol Telegram: `Shorten Link`, `TeraBox Pro`, `Convert TeraBox`, `Dashboard TeraBox`, dan `Bantuan`.
 - Auto deteksi URL dari pesan teks dan caption.
 - Command `/short <url>` untuk shorten manual.
 - Alias custom: `/short https://example.com nama-alias` atau `/short https://example.com alias=nama-alias`.
 - Mode `/terabox_pro <url>` untuk fitur TeraBox Pro lewat API provider seperti xAPIverse.
+- Mode `/convert_terabox <url>` atau `/pindah <url>` untuk save link TeraBox ke akun yang sudah login, lalu membuat share link baru.
 - Dashboard session TeraBox pribadi: login QR, cek status, dan putus session melalui Puppeteer lokal atau endpoint resmi/authorized.
 - Bisa dibatasi hanya user/chat tertentu lewat `ALLOWED_USER_IDS` dan `ALLOWED_CHAT_IDS`.
 - Long polling, jadi tidak perlu webhook.
@@ -160,6 +161,14 @@ Response yang didukung:
 
 `PUPPETEER_EXECUTABLE_PATH` opsional. Isi path Chrome/Chromium custom kalau Puppeteer bawaan tidak bisa dipakai di server.
 
+`TERABOX_CONVERT_DESTINATION_ROOT` opsional. Default `/Tuna Bot`. Folder tujuan di akun TeraBox untuk hasil convert.
+
+`TERABOX_CONVERT_SHARE_PASSWORD` opsional. Kosong berarti share link tanpa password. Jika diisi harus 4 karakter alfanumerik.
+
+`TERABOX_CONVERT_SHARE_PERIOD` opsional. Default `0` atau tanpa expired.
+
+`TERABOX_CONVERT_WAIT_TIMEOUT_MS` opsional. Default `30000`. Durasi bot menunggu file hasil save muncul sebelum membuat share folder baru.
+
 `DATA_DIR` opsional. Default `data`. Bot menyimpan metadata session lokal di `data/terabox-sessions.json`; file ini diabaikan Git.
 
 ## Cara Pakai
@@ -192,6 +201,8 @@ Untuk TeraBox:
 /terabox https://1024terabox.com/s/xxxxx
 /terabox_dashboard
 /terabox_login
+/convert_terabox https://1024terabox.com/s/xxxxx
+/pindah https://1024terabox.com/s/xxxxx
 /terabox_connect
 /terabox_status
 /terabox_logout
@@ -200,6 +211,8 @@ Untuk TeraBox:
 Atau klik tombol `TeraBox Pro`, lalu kirim link TeraBox.
 
 Untuk dashboard session pribadi, klik `Dashboard TeraBox`, lalu pilih `Login TeraBox`. Jika `TERABOX_SESSION_START_API_URL` diisi, bot memakai endpoint itu. Jika kosong, bot membuka login TeraBox via Puppeteer, mengirim QR ke chat private, lalu menyimpan session setelah QR discan.
+
+Untuk converter, login dulu sampai `Status Session` menjadi `connected`, lalu klik `Convert TeraBox` dan kirim link TeraBox. Bot akan menyimpan file/folder ke akun TeraBox, membuat share link baru dari folder hasil convert, lalu mengirim link itu ke Telegram.
 
 Bot akan membalas dengan link pendek dari Droplink.
 
@@ -224,4 +237,4 @@ Untuk login via Puppeteer, bot menyimpan cookie session `ndus` sebagai `sessionI
 
 Fitur `TeraBox Pro` dengan xAPIverse menghasilkan metadata, download link, dan stream link. Itu bukan endpoint resmi untuk memindahkan file ke akun TeraBox kamu atau membuat share link baru dari akun kamu.
 
-Dashboard session hanya kerangka integrasi ke API resmi/authorized milikmu. Gunakan hanya untuk file yang kamu miliki atau punya izin untuk salin dan share ulang.
+Dashboard session dan converter memakai akun TeraBox yang login. Gunakan hanya untuk file yang kamu miliki atau punya izin untuk salin dan share ulang.
