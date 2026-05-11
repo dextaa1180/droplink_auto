@@ -132,7 +132,7 @@ async function gotoJpg6Login(page, loginUrl, timeoutMs) {
 }
 
 async function renderResponseHtml(page, response, responseUrl) {
-  const html = await response.text();
+  const html = await readResponseHtml(response, responseUrl);
   if (!html || html.length < 100) {
     return {
       ok: false,
@@ -152,6 +152,31 @@ async function renderResponseHtml(page, response, responseUrl) {
     ok: true,
     state
   };
+}
+
+async function readResponseHtml(response, responseUrl) {
+  try {
+    return await response.text();
+  } catch (error) {
+    return fetchHtml(responseUrl, error);
+  }
+}
+
+async function fetchHtml(url, originalError) {
+  const response = await fetch(url, {
+    headers: {
+      accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+      'accept-language': 'en-US,en;q=0.9,id;q=0.8',
+      'user-agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36'
+    },
+    signal: AbortSignal.timeout(45000)
+  });
+
+  if (!response.ok) {
+    throw new Error(`Puppeteer tidak bisa baca body (${originalError.message}) dan fetch fallback HTTP ${response.status}`);
+  }
+
+  return response.text();
 }
 
 function injectBaseHref(html, responseUrl) {
