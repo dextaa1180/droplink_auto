@@ -9,10 +9,15 @@ async function loginJpg6Manually(options = {}) {
   const browser = await puppeteer.launch({
     headless: options.headless !== false,
     executablePath: options.executablePath || undefined,
+    acceptInsecureCerts: true,
     args: [
       '--no-sandbox',
       '--disable-setuid-sandbox',
-      '--disable-dev-shm-usage'
+      '--disable-dev-shm-usage',
+      '--disable-gpu',
+      '--ignore-certificate-errors',
+      '--disable-blink-features=AutomationControlled',
+      '--window-size=1280,900'
     ]
   });
 
@@ -21,6 +26,9 @@ async function loginJpg6Manually(options = {}) {
     page = await browser.newPage();
     await page.setViewport({ width: 1280, height: 900, deviceScaleFactor: 1 });
     await page.setUserAgent(options.userAgent || 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36');
+    await page.setExtraHTTPHeaders({
+      'accept-language': 'en-US,en;q=0.9,id;q=0.8'
+    });
     await gotoJpg6Login(page, loginUrl, options.navigationTimeoutMs || 45000);
 
     if (typeof options.onReady === 'function') {
@@ -45,10 +53,25 @@ async function loginJpg6Manually(options = {}) {
 
 async function gotoJpg6Login(page, loginUrl, timeoutMs) {
   let lastError = null;
+  const failedRequests = [];
+
+  page.on('requestfailed', (request) => {
+    const failure = request.failure();
+    failedRequests.push(`${request.url()} => ${failure ? failure.errorText : 'unknown'}`);
+    if (failedRequests.length > 5) {
+      failedRequests.shift();
+    }
+  });
 
   for (let attempt = 1; attempt <= 2; attempt += 1) {
     try {
-      await page.goto(loginUrl, {
+      const homeResponse = await page.goto(DEFAULT_JPG6_BASE_URL, {
+        waitUntil: 'domcontentloaded',
+        timeout: timeoutMs
+      });
+      await sleep(2500);
+
+      const loginResponse = await page.goto(loginUrl, {
         waitUntil: 'domcontentloaded',
         timeout: timeoutMs
       });
@@ -59,13 +82,19 @@ async function gotoJpg6Login(page, loginUrl, timeoutMs) {
         return;
       }
 
-      lastError = new Error('Puppeteer masih berada di about:blank setelah membuka JPG6.');
+      lastError = new Error([
+        'Puppeteer masih berada di about:blank setelah membuka JPG6',
+        `home=${homeResponse ? homeResponse.status() : 'no-response'}`,
+        `login=${loginResponse ? loginResponse.status() : 'no-response'}`,
+        `url=${currentUrl || 'empty'}`
+      ].join(', '));
     } catch (error) {
       lastError = error;
     }
   }
 
-  throw new Error(`Gagal membuka halaman login JPG6 (${loginUrl}): ${lastError ? lastError.message : 'unknown error'}`);
+  const failedText = failedRequests.length > 0 ? ` Failed requests: ${failedRequests.join(' | ')}` : '';
+  throw new Error(`Gagal membuka halaman login JPG6 (${loginUrl}): ${lastError ? lastError.message : 'unknown error'}.${failedText}`);
 }
 
 async function verifyJpg6Session(session, options = {}) {
@@ -81,10 +110,15 @@ async function verifyJpg6Session(session, options = {}) {
   const browser = await puppeteer.launch({
     headless: options.headless !== false,
     executablePath: options.executablePath || undefined,
+    acceptInsecureCerts: true,
     args: [
       '--no-sandbox',
       '--disable-setuid-sandbox',
-      '--disable-dev-shm-usage'
+      '--disable-dev-shm-usage',
+      '--disable-gpu',
+      '--ignore-certificate-errors',
+      '--disable-blink-features=AutomationControlled',
+      '--window-size=1280,900'
     ]
   });
 
