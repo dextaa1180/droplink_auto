@@ -78,7 +78,13 @@ async function gotoJpg6Login(page, loginUrl, timeoutMs) {
       await sleep(5000);
 
       const currentUrl = page.url();
-      if (currentUrl && currentUrl !== 'about:blank') {
+      const pageState = await getPageNavigationState(page).catch(() => ({
+        location: '',
+        title: '',
+        bodyLength: 0
+      }));
+      const responseUrl = loginResponse ? loginResponse.url() : '';
+      if (isUsableJpg6Page(currentUrl, responseUrl, pageState)) {
         return;
       }
 
@@ -86,7 +92,11 @@ async function gotoJpg6Login(page, loginUrl, timeoutMs) {
         'Puppeteer masih berada di about:blank setelah membuka JPG6',
         `home=${homeResponse ? homeResponse.status() : 'no-response'}`,
         `login=${loginResponse ? loginResponse.status() : 'no-response'}`,
-        `url=${currentUrl || 'empty'}`
+        `url=${currentUrl || 'empty'}`,
+        `responseUrl=${responseUrl || 'empty'}`,
+        `location=${pageState.location || 'empty'}`,
+        `title=${pageState.title || 'empty'}`,
+        `body=${pageState.bodyLength}`
       ].join(', '));
     } catch (error) {
       lastError = error;
@@ -95,6 +105,21 @@ async function gotoJpg6Login(page, loginUrl, timeoutMs) {
 
   const failedText = failedRequests.length > 0 ? ` Failed requests: ${failedRequests.join(' | ')}` : '';
   throw new Error(`Gagal membuka halaman login JPG6 (${loginUrl}): ${lastError ? lastError.message : 'unknown error'}.${failedText}`);
+}
+
+function isUsableJpg6Page(currentUrl, responseUrl, pageState) {
+  const candidates = [currentUrl, responseUrl, pageState && pageState.location].filter(Boolean);
+  const hasJpg6Url = candidates.some((value) => /^https:\/\/(?:www\.)?jpg6\.su\//i.test(value));
+  const hasBody = pageState && Number(pageState.bodyLength) > 100;
+  return hasJpg6Url && hasBody;
+}
+
+async function getPageNavigationState(page) {
+  return page.evaluate(() => ({
+    location: window.location.href,
+    title: document.title || '',
+    bodyLength: document.body ? (document.body.innerText || document.body.textContent || '').length : 0
+  }));
 }
 
 async function verifyJpg6Session(session, options = {}) {
