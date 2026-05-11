@@ -2,6 +2,7 @@
 
 const fs = require('node:fs');
 const path = require('node:path');
+const { DEFAULT_LOGIN_URL, loginWithQrCode } = require('./terabox-login');
 
 loadEnvFile(path.join(process.cwd(), '.env'));
 
@@ -10,6 +11,7 @@ const telegramBaseUrl = `https://api.telegram.org/bot${config.telegramBotToken}`
 const droplinkHost = safeHost(config.droplinkBaseUrl);
 const chatModes = new Map();
 const teraboxSessions = loadSessionStore(config.sessionStorePath);
+const activeTeraboxLogins = new Map();
 
 const MODES = {
   SHORTEN: 'shorten',
@@ -20,6 +22,7 @@ const MENU_BUTTONS = {
   SHORTEN: 'Shorten Link',
   TERABOX_PRO: 'TeraBox Pro',
   TERABOX_DASHBOARD: 'Dashboard TeraBox',
+  TERABOX_LOGIN: 'Login TeraBox',
   TERABOX_CONNECT: 'Hubungkan TeraBox',
   TERABOX_STATUS: 'Status Session',
   TERABOX_DISCONNECT: 'Putus Session',
@@ -178,6 +181,11 @@ async function handleCommand(message, command) {
     return;
   }
 
+  if (command.name === 'terabox_login' || command.name === 'login_terabox') {
+    await startTeraboxSession(message);
+    return;
+  }
+
   if (command.name === 'terabox_status' || command.name === 'status_terabox') {
     await showTeraboxSessionStatus(message);
     return;
@@ -212,6 +220,11 @@ async function handleMenuAction(message, action) {
   }
 
   if (action === 'terabox_connect') {
+    await startTeraboxSession(message);
+    return;
+  }
+
+  if (action === 'terabox_login') {
     await startTeraboxSession(message);
     return;
   }
@@ -361,14 +374,7 @@ async function startTeraboxSession(message) {
   }
 
   if (!config.teraboxSessionStartApiUrl) {
-    await reply(message.chat.id, message.message_id, [
-      'Endpoint session TeraBox belum dikonfigurasi.',
-      '',
-      'Isi TERABOX_SESSION_START_API_URL di .env dengan endpoint resmi/authorized yang membuat QR login.',
-      'Bot tidak menyimpan cookie akun; hanya sessionId/status dari endpoint itu.'
-    ].join('\n'), {
-      reply_markup: teraboxDashboardKeyboard()
-    });
+    await startTeraboxPuppeteerLogin(message);
     return;
   }
 
@@ -409,6 +415,72 @@ async function startTeraboxSession(message) {
   }
 }
 
+async function startTeraboxPuppeteerLogin(message) {
+  if (!config.teraboxLoginPuppeteerEnabled) {
+    await reply(message.chat.id, message.message_id, [
+      'Login QR lokal belum aktif.',
+      '',
+      'Isi TERABOX_LOGIN_PUPPETEER_ENABLED=true atau pakai TERABOX_SESSION_START_API_URL jika login ditangani endpoint terpisah.'
+    ].join('\n'), {
+      reply_markup: teraboxDashboardKeyboard()
+    });
+    return;
+  }
+
+  const loginKey = String(message.from.id);
+  if (activeTeraboxLogins.has(loginKey)) {
+    await reply(message.chat.id, message.message_id, 'Login TeraBox sedang berjalan. Scan QR yang sudah dikirim, lalu tunggu status sukses.', {
+      reply_markup: teraboxDashboardKeyboard()
+    });
+    return;
+  }
+
+  activeTeraboxLogins.set(loginKey, true);
+
+  await reply(message.chat.id, message.message_id, [
+    'Saya buka halaman login TeraBox dan menyiapkan QR.',
+    'Scan QR dari aplikasi TeraBox, lalu konfirmasi login di HP.'
+  ].join('\n'), {
+    reply_markup: teraboxDashboardKeyboard()
+  });
+
+  runTeraboxPuppeteerLogin(message, loginKey).catch((error) => {
+    console.error('[terabox-login]', error);
+  });
+}
+
+async function runTeraboxPuppeteerLogin(message, loginKey) {
+  try {
+    const result = await loginWithQrCode({
+      loginUrl: config.teraboxLoginUrl,
+      headless: config.teraboxLoginHeadless,
+      executablePath: config.teraboxLoginExecutablePath,
+      loginTimeoutMs: config.teraboxLoginTimeoutMs,
+      onQrImage: async (qrImage) => {
+        await sendPhotoBuffer(message.chat.id, qrImage, [
+          'QR Login TeraBox',
+          '',
+          'Scan QR ini dari aplikasi TeraBox. Setelah sukses, bot akan menyimpan session dan mengirim status.'
+        ].join('\n'), {
+          reply_to_message_id: message.message_id,
+          reply_markup: teraboxDashboardKeyboard()
+        });
+      }
+    });
+
+    const session = savePuppeteerLoginSession(message, result);
+    await sendMessage(message.chat.id, formatTeraboxSessionStatus(session, 'Login QR berhasil. Session TeraBox sudah tersimpan.'), {
+      reply_markup: teraboxDashboardKeyboard()
+    });
+  } catch (error) {
+    await sendMessage(message.chat.id, `Gagal login TeraBox via QR: ${error.message}`, {
+      reply_markup: teraboxDashboardKeyboard()
+    });
+  } finally {
+    activeTeraboxLogins.delete(loginKey);
+  }
+}
+
 async function showTeraboxSessionStatus(message) {
   if (!(await ensureTeraboxDashboardAccess(message))) {
     return;
@@ -416,7 +488,7 @@ async function showTeraboxSessionStatus(message) {
 
   const existing = getUserSession(message.from.id);
   if (!existing) {
-    await reply(message.chat.id, message.message_id, 'Belum ada session TeraBox. Pilih Hubungkan TeraBox untuk mulai.', {
+    await reply(message.chat.id, message.message_id, 'Belum ada session TeraBox. Pilih Login TeraBox untuk mulai.', {
       reply_markup: teraboxDashboardKeyboard()
     });
     return;
@@ -554,6 +626,49 @@ async function sendPhoto(chatId, photo, caption, options = {}) {
   });
 }
 
+async function sendPhotoBuffer(chatId, photoBuffer, caption, options = {}) {
+  return telegramForm('sendPhoto', {
+    chat_id: String(chatId),
+    photo: new Blob([photoBuffer], { type: 'image/png' }),
+    caption,
+    ...options
+  }, {
+    photo: 'terabox-login-qr.png'
+  });
+}
+
+async function telegramForm(method, fields, filenames = {}) {
+  const form = new FormData();
+
+  for (const [key, value] of Object.entries(fields)) {
+    if (value === undefined || value === null) {
+      continue;
+    }
+
+    if (value instanceof Blob) {
+      form.append(key, value, filenames[key] || `${key}.bin`);
+    } else if (typeof value === 'object') {
+      form.append(key, JSON.stringify(value));
+    } else {
+      form.append(key, String(value));
+    }
+  }
+
+  const response = await fetch(`${telegramBaseUrl}/${method}`, {
+    method: 'POST',
+    body: form,
+    signal: AbortSignal.timeout(config.requestTimeoutMs)
+  });
+
+  const payload = await response.json().catch(() => null);
+  if (!response.ok || !payload || payload.ok !== true) {
+    const description = payload && payload.description ? payload.description : `Telegram HTTP ${response.status}`;
+    throw new Error(description);
+  }
+
+  return payload.result;
+}
+
 async function callTeraboxSessionApi(endpoint, body) {
   const headers = {
     accept: 'application/json, text/plain;q=0.9, */*;q=0.8',
@@ -635,6 +750,11 @@ function readConfig() {
     teraboxSessionStatusApiUrl: optionalUrl(process.env.TERABOX_SESSION_STATUS_API_URL || '', 'TERABOX_SESSION_STATUS_API_URL'),
     teraboxSessionDisconnectApiUrl: optionalUrl(process.env.TERABOX_SESSION_DISCONNECT_API_URL || '', 'TERABOX_SESSION_DISCONNECT_API_URL'),
     teraboxSessionApiKey: (process.env.TERABOX_SESSION_API_KEY || '').trim(),
+    teraboxLoginPuppeteerEnabled: parseBool(process.env.TERABOX_LOGIN_PUPPETEER_ENABLED, true),
+    teraboxLoginUrl: optionalUrl(process.env.TERABOX_LOGIN_URL || DEFAULT_LOGIN_URL, 'TERABOX_LOGIN_URL'),
+    teraboxLoginTimeoutMs: parsePositiveInt(process.env.TERABOX_LOGIN_TIMEOUT_MS, 180000),
+    teraboxLoginHeadless: parseBool(process.env.TERABOX_LOGIN_HEADLESS, true),
+    teraboxLoginExecutablePath: (process.env.PUPPETEER_EXECUTABLE_PATH || '').trim(),
     sessionStorePath: resolveWorkspacePath(process.env.TERABOX_SESSION_STORE_FILE || path.join(process.env.DATA_DIR || 'data', 'terabox-sessions.json'))
   };
 }
@@ -736,6 +856,10 @@ function parseMenuButton(text) {
 
   if (normalized === MENU_BUTTONS.TERABOX_CONNECT.toLowerCase()) {
     return 'terabox_connect';
+  }
+
+  if (normalized === MENU_BUTTONS.TERABOX_LOGIN.toLowerCase()) {
+    return 'terabox_login';
   }
 
   if (normalized === MENU_BUTTONS.TERABOX_STATUS.toLowerCase()) {
@@ -925,6 +1049,34 @@ function saveSessionFromPayload(message, payload, fallbackStatus) {
   return session;
 }
 
+function savePuppeteerLoginSession(message, result) {
+  const existing = getUserSession(message.from.id) || {};
+  const now = new Date().toISOString();
+
+  if (!result || !result.ndus) {
+    throw new Error('Puppeteer tidak menemukan cookie ndus setelah login.');
+  }
+
+  const session = {
+    userId: String(message.from.id),
+    chatId: String(message.chat.id),
+    sessionId: result.ndus,
+    status: 'connected',
+    authType: 'ndus',
+    loginMethod: 'puppeteer_qr',
+    pageUrl: result.pageUrl || '',
+    accountName: existing.accountName || '',
+    accountEmail: existing.accountEmail || '',
+    createdAt: existing.createdAt || now,
+    connectedAt: now,
+    expiresAt: '',
+    updatedAt: now
+  };
+
+  setUserSession(message.from.id, session);
+  return session;
+}
+
 function normalizeSessionStatus(status) {
   const normalized = String(status || '').toLowerCase();
   if (normalized === 'authorized') {
@@ -1040,6 +1192,7 @@ function helpText() {
     '/terabox_pro https://1024terabox.com/s/xxxxx',
     '/terabox https://1024terabox.com/s/xxxxx',
     '/terabox_dashboard',
+    '/terabox_login',
     '/terabox_connect',
     '/terabox_status',
     '/terabox_logout',
@@ -1077,7 +1230,7 @@ function teraboxDashboardText(session) {
     '',
     session ? formatSessionSummary(session) : 'Status: belum terhubung',
     '',
-    `${MENU_BUTTONS.TERABOX_CONNECT} - mulai login QR dari endpoint session`,
+    `${MENU_BUTTONS.TERABOX_LOGIN} - login QR lewat Puppeteer atau endpoint session`,
     `${MENU_BUTTONS.TERABOX_STATUS} - cek status session`,
     `${MENU_BUTTONS.TERABOX_DISCONNECT} - putus session lokal/endpoint`
   ].join('\n');
@@ -1086,7 +1239,7 @@ function teraboxDashboardText(session) {
 function teraboxDashboardKeyboard() {
   return {
     keyboard: [
-      [{ text: MENU_BUTTONS.TERABOX_CONNECT }, { text: MENU_BUTTONS.TERABOX_STATUS }],
+      [{ text: MENU_BUTTONS.TERABOX_LOGIN }, { text: MENU_BUTTONS.TERABOX_STATUS }],
       [{ text: MENU_BUTTONS.TERABOX_DISCONNECT }],
       [{ text: MENU_BUTTONS.SHORTEN }, { text: MENU_BUTTONS.TERABOX_PRO }],
       [{ text: MENU_BUTTONS.TERABOX_DASHBOARD }, { text: MENU_BUTTONS.HELP }]

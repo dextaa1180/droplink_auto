@@ -9,7 +9,7 @@ Bot Telegram untuk auto-shortener link lewat API Droplink.co.
 - Command `/short <url>` untuk shorten manual.
 - Alias custom: `/short https://example.com nama-alias` atau `/short https://example.com alias=nama-alias`.
 - Mode `/terabox_pro <url>` untuk fitur TeraBox Pro lewat API provider seperti xAPIverse.
-- Dashboard session TeraBox pribadi: hubungkan, cek status, dan putus session melalui endpoint resmi/authorized.
+- Dashboard session TeraBox pribadi: login QR, cek status, dan putus session melalui Puppeteer lokal atau endpoint resmi/authorized.
 - Bisa dibatasi hanya user/chat tertentu lewat `ALLOWED_USER_IDS` dan `ALLOWED_CHAT_IDS`.
 - Long polling, jadi tidak perlu webhook.
 
@@ -150,6 +150,16 @@ Response yang didukung:
 
 `TERABOX_SESSION_API_KEY` opsional. Jika diisi, bot mengirim header `Authorization: Bearer ...` dan `x-api-key` ke endpoint session.
 
+`TERABOX_LOGIN_PUPPETEER_ENABLED` opsional. Default `true`. Jika `TERABOX_SESSION_START_API_URL` kosong, tombol `Login TeraBox` memakai browser Puppeteer lokal untuk membuka halaman login, mengambil screenshot QR, dan menyimpan session setelah QR berhasil discan.
+
+`TERABOX_LOGIN_URL` opsional. URL halaman login QR TeraBox. Default sudah diisi di `.env.example`.
+
+`TERABOX_LOGIN_TIMEOUT_MS` opsional. Default `180000` atau 3 menit.
+
+`TERABOX_LOGIN_HEADLESS` opsional. Default `true`. Isi `false` saat debugging di komputer desktop kalau ingin melihat browsernya.
+
+`PUPPETEER_EXECUTABLE_PATH` opsional. Isi path Chrome/Chromium custom kalau Puppeteer bawaan tidak bisa dipakai di server.
+
 `DATA_DIR` opsional. Default `data`. Bot menyimpan metadata session lokal di `data/terabox-sessions.json`; file ini diabaikan Git.
 
 ## Cara Pakai
@@ -181,6 +191,7 @@ Untuk TeraBox:
 /terabox_pro https://1024terabox.com/s/xxxxx
 /terabox https://1024terabox.com/s/xxxxx
 /terabox_dashboard
+/terabox_login
 /terabox_connect
 /terabox_status
 /terabox_logout
@@ -188,7 +199,7 @@ Untuk TeraBox:
 
 Atau klik tombol `TeraBox Pro`, lalu kirim link TeraBox.
 
-Untuk dashboard session pribadi, klik `Dashboard TeraBox`, lalu pilih `Hubungkan TeraBox`. Jika endpoint session mengembalikan `qrImageUrl`, bot akan mengirim barcode/QR login ke chat private.
+Untuk dashboard session pribadi, klik `Dashboard TeraBox`, lalu pilih `Login TeraBox`. Jika `TERABOX_SESSION_START_API_URL` diisi, bot memakai endpoint itu. Jika kosong, bot membuka login TeraBox via Puppeteer, mengirim QR ke chat private, lalu menyimpan session setelah QR discan.
 
 Bot akan membalas dengan link pendek dari Droplink.
 
@@ -209,7 +220,7 @@ pm2 save
 
 Simpan API key hanya di `.env`. Jangan kirim API key ke chat Telegram atau commit file `.env`.
 
-Bot hanya menyimpan metadata session seperti `sessionId`, status, nama akun, dan expiry. Jangan membuat endpoint yang mengirim cookie atau password mentah ke bot.
+Untuk login via Puppeteer, bot menyimpan cookie session `ndus` sebagai `sessionId` lokal. Batasi dashboard dengan `TERABOX_DASHBOARD_USER_IDS` dan jangan commit isi folder `data`.
 
 Fitur `TeraBox Pro` dengan xAPIverse menghasilkan metadata, download link, dan stream link. Itu bukan endpoint resmi untuk memindahkan file ke akun TeraBox kamu atau membuat share link baru dari akun kamu.
 

@@ -12,6 +12,7 @@
     "node": ">=18"
   },
   "dependencies": {
+    "puppeteer": "^24.43.0",
     "terabox-api": "^2.9.2"
   }
 }
